@@ -49,17 +49,27 @@ export const createJoystick = () => {
     return { dx, dy, maxRadius };
   };
   
+  const DEAD_ZONE = 0.2; // fraction of maxRadius before input registers
+
   const updateKnobPosition = (clientX: number, clientY: number) => {
     if (!active) return;
-    
+
     const { dx, dy, maxRadius } = getJoystickPosition(clientX, clientY);
-    
+
     // Move knob visually
     joystickKnob.style.transform = `translate(${dx}px, ${dy}px)`;
-    
-    // Update global joystick state if function exists
+
+    // Apply dead zone — remap the live range [DEAD_ZONE, 1] to [0, 1]
     if (window.updateJoystick) {
-      window.updateJoystick(dx / maxRadius, dy / maxRadius);
+      const nx = dx / maxRadius;
+      const ny = dy / maxRadius;
+      const dist = Math.sqrt(nx * nx + ny * ny);
+      if (dist < DEAD_ZONE) {
+        window.updateJoystick(0, 0);
+      } else {
+        const scale = (dist - DEAD_ZONE) / (1 - DEAD_ZONE) / dist;
+        window.updateJoystick(nx * scale, ny * scale);
+      }
     }
   };
   
