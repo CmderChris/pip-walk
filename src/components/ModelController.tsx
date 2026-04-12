@@ -414,6 +414,7 @@ const ModelController = () => {
       sitLoopActionRef.current?.setEffectiveWeight(0);
       sitEndActionRef.current?.setEffectiveWeight(1);
       jumpActionRef.current?.setEffectiveWeight(0);
+      scratchActionRef.current?.setEffectiveWeight(0);
       // → idle via finished event, which resets animationWeightRef to 0
     } else if (sitState === 'scratch') {
       // Blend scratch in over BLEND_TIME, then blend sit_loop back in during the last 45% of the clip
