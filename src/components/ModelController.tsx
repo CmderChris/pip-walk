@@ -5,10 +5,11 @@ import * as THREE from 'three';
 import {
   MODEL_PATH, TEXTURE_BASE,
   WALK_ANIM, IDLE_ANIM,
-  SIT_START_ANIM, SIT_IDLE_ANIM, SIT_END_ANIM, SCRATCH_ANIM, PET_STAND_ANIM,
+  SIT_START_ANIM, SIT_IDLE_ANIM, SIT_LOOP2_ANIM, SIT_END_ANIM, SCRATCH_ANIM, PET_STAND_ANIM,
   JUMP_START_ANIM, JUMP_AIR_ANIM, JUMP_LAND_ANIM,
   JUMP_START_MOVE_ANIM, JUMP_AIR_MOVE_ANIM, JUMP_LAND_MOVE_ANIM,
   SIT_DELAY, BLEND_TIME, JUMP_BLEND_TIME,
+  SIT_LOOP2_INTERVAL_MIN, SIT_LOOP2_INTERVAL_MAX,
   MOVE_SPEED, MODEL_Y_OFFSET, ROTATION_SPEED, MIN_SPEED_FOR_WALK,
   EDGE_MARGIN, PLAY_AREA_FAR_Z,
   type SitState,
@@ -43,13 +44,16 @@ const ModelController = () => {
     sitStart: null, sitIdle: null, sitEnd: null,
     jumpStart: null, jumpAir: null, jumpLand: null,
     jumpStartMove: null, jumpAirMove: null, jumpLandMove: null,
-    scratch: null, petStand: null,
+    scratch: null, sitLoop2: null, petStand: null,
   });
 
   // ── State refs ─────────────────────────────────────────────────────────────
   const sitStateRef = useRef<SitState>('idle');
   const idleTimeRef = useRef(0);
   const animationWeightRef = useRef(0);
+  const sitLoop2TimerRef = useRef(
+    SIT_LOOP2_INTERVAL_MIN + Math.random() * (SIT_LOOP2_INTERVAL_MAX - SIT_LOOP2_INTERVAL_MIN)
+  );
 
   // ── Movement refs ──────────────────────────────────────────────────────────
   const ndcPosRef = useRef(new THREE.Vector2(0, -0.5));
@@ -107,12 +111,13 @@ const ModelController = () => {
     const jumpAirMoveClip   = find(JUMP_AIR_MOVE_ANIM);
     const jumpLandMoveClip  = find(JUMP_LAND_MOVE_ANIM);
     const scratchClip    = find(SCRATCH_ANIM);
+    const sitLoop2Clip   = find(SIT_LOOP2_ANIM);
     const petStandClip   = find(PET_STAND_ANIM);
 
     if (!walkClip || !idleClip || !sitStartClip || !sitIdleClip || !sitEndClip ||
         !jumpStartClip || !jumpAirClip || !jumpLandClip ||
         !jumpStartMoveClip || !jumpAirMoveClip || !jumpLandMoveClip ||
-        !scratchClip || !petStandClip) return;
+        !scratchClip || !sitLoop2Clip || !petStandClip) return;
 
     const mixer = new THREE.AnimationMixer(scene);
 
@@ -167,6 +172,10 @@ const ModelController = () => {
     scratchAction.setLoop(THREE.LoopOnce, 1);
     scratchAction.clampWhenFinished = true;
 
+    const sitLoop2Action = mixer.clipAction(sitLoop2Clip);
+    sitLoop2Action.setLoop(THREE.LoopOnce, 1);
+    sitLoop2Action.clampWhenFinished = true;
+
     const petStandAction = mixer.clipAction(petStandClip);
     petStandAction.setLoop(THREE.LoopOnce, 1);
     petStandAction.clampWhenFinished = true;
@@ -193,6 +202,9 @@ const ModelController = () => {
         landingSpeedRef.current = 0.4;
       } else if (e.action === a.scratch && sitStateRef.current === 'scratch') {
         sitStateRef.current = 'sit_loop';
+      } else if (e.action === a.sitLoop2 && sitStateRef.current === 'sit_loop2') {
+        sitStateRef.current = 'sit_loop';
+        sitLoop2TimerRef.current = SIT_LOOP2_INTERVAL_MIN + Math.random() * (SIT_LOOP2_INTERVAL_MAX - SIT_LOOP2_INTERVAL_MIN);
       } else if (e.action === a.petStand && sitStateRef.current === 'pet') {
         sitStateRef.current = 'idle';
         animationWeightRef.current = 0;
@@ -207,7 +219,7 @@ const ModelController = () => {
       sitStart: sitStartAction, sitIdle: sitIdleAction, sitEnd: sitEndAction,
       jumpStart: jumpStartAction, jumpAir: jumpAirAction, jumpLand: jumpLandAction,
       jumpStartMove: jumpStartMoveAction, jumpAirMove: jumpAirMoveAction, jumpLandMove: jumpLandMoveAction,
-      scratch: scratchAction, petStand: petStandAction,
+      scratch: scratchAction, sitLoop2: sitLoop2Action, petStand: petStandAction,
     };
 
     return () => {
@@ -219,7 +231,7 @@ const ModelController = () => {
         sitStart: null, sitIdle: null, sitEnd: null,
         jumpStart: null, jumpAir: null, jumpLand: null,
         jumpStartMove: null, jumpAirMove: null, jumpLandMove: null,
-        scratch: null, petStand: null,
+        scratch: null, sitLoop2: null, petStand: null,
       };
       sitStateRef.current = 'idle';
       idleTimeRef.current = 0;
@@ -441,6 +453,30 @@ const ModelController = () => {
       if (hasInput) {
         sitStateRef.current = 'sit_end';
         a.sitEnd?.reset().play();
+      } else {
+        sitLoop2TimerRef.current -= delta;
+        if (sitLoop2TimerRef.current <= 0) {
+          sitStateRef.current = 'sit_loop2';
+          animationWeightRef.current = 0;
+          a.sitLoop2?.reset().play();
+        }
+      }
+    } else if (sitState === 'sit_loop2') {
+      const clipDuration = a.sitLoop2 ? a.sitLoop2.getClip().duration : 1;
+      const progress = a.sitLoop2 ? a.sitLoop2.time / clipDuration : 0;
+      const BLEND_OUT_START = 0.55;
+      let w: number;
+      if (progress < BLEND_OUT_START) {
+        animationWeightRef.current = Math.min(1, animationWeightRef.current + delta / BLEND_TIME);
+        w = animationWeightRef.current;
+      } else {
+        w = Math.max(0, 1 - (progress - BLEND_OUT_START) / (1 - BLEND_OUT_START));
+      }
+      setWeights(a, { sitIdle: 1 - w, sitLoop2: w });
+      if (hasInput) {
+        sitStateRef.current = 'sit_end';
+        a.sitEnd?.reset().play();
+        sitLoop2TimerRef.current = SIT_LOOP2_INTERVAL_MIN + Math.random() * (SIT_LOOP2_INTERVAL_MAX - SIT_LOOP2_INTERVAL_MIN);
       }
     } else if (sitState === 'sit_end') {
       setWeights(a, { sitEnd: 1 });

@@ -13,6 +13,7 @@ export type AnimationActions = {
   jumpAirMove: THREE.AnimationAction | null;
   jumpLandMove: THREE.AnimationAction | null;
   scratch: THREE.AnimationAction | null;
+  sitLoop2: THREE.AnimationAction | null;
   petStand: THREE.AnimationAction | null;
 };
 

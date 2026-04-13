@@ -6,8 +6,8 @@ export const WALK_ANIM = 'Arm_SpitzWalk_F_IP';
 export const IDLE_ANIM = 'Arm_SpitzIdle_1';
 export const SIT_START_ANIM = 'Arm_SpitzSitting_start';
 export const SIT_END_ANIM = 'Arm_SpitzSitting_end';
-// Plays on random interval while sitting
-export const SIT_IDLE_ANIM = 'Arm_SpitzSitting_loop_1';
+export const SIT_IDLE_ANIM = 'Arm_SpitzSitting_loop_1';  // base sitting loop
+export const SIT_LOOP2_ANIM = 'Arm_SpitzSitting_loop_2'; // plays on random interval
 export const SCRATCH_ANIM = 'Arm_SpitzScratching';
 export const PET_STAND_ANIM = 'Arm_SpitzIdle_3';
 
@@ -27,6 +27,8 @@ export const BLEND_TIME = 0.3;         // standard crossfade duration in seconds
 export const JUMP_BLEND_TIME = 0.35;   // jump landing → idle/walk blend duration
 export const SCRATCH_INTERVAL_MIN = 15;
 export const SCRATCH_INTERVAL_MAX = 35;
+export const SIT_LOOP2_INTERVAL_MIN = 15;
+export const SIT_LOOP2_INTERVAL_MAX = 20;
 export const MOVE_SPEED = 7;           // world units/second
 export const MODEL_Y_OFFSET = 0.25;    // lifts model so feet don't clip ground
 export const ROTATION_SPEED = 10;
@@ -44,4 +46,5 @@ export type SitState =
   | 'jump_air'
   | 'jump_land'
   | 'scratch'
+  | 'sit_loop2'
   | 'pet';
