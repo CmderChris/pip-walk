@@ -5,9 +5,11 @@ export const TEXTURE_BASE = '/models/pomeranian_model/spitz_textures/texture';
 export const WALK_ANIM = 'Arm_SpitzWalk_F_IP';
 export const IDLE_ANIM = 'Arm_SpitzIdle_1';
 export const SIT_START_ANIM = 'Arm_SpitzSitting_start';
-export const SIT_LOOP_ANIM = 'Arm_SpitzSitting_loop_1';
 export const SIT_END_ANIM = 'Arm_SpitzSitting_end';
+// Plays on random interval while sitting
+export const SIT_IDLE_ANIM = 'Arm_SpitzSitting_loop_1';
 export const SCRATCH_ANIM = 'Arm_SpitzScratching';
+export const PET_STAND_ANIM = 'Arm_SpitzIdle_3';
 
 // Standing jump
 export const JUMP_START_ANIM = 'Arm_SpitzJumpStart_Place';
@@ -41,4 +43,5 @@ export type SitState =
   | 'jump_start'
   | 'jump_air'
   | 'jump_land'
-  | 'scratch';
+  | 'scratch'
+  | 'pet';

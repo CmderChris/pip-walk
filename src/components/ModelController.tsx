@@ -1,15 +1,14 @@
 import { useEffect, useRef } from 'react';
-import { useFrame } from '@react-three/fiber';
+import { useFrame, useThree } from '@react-three/fiber';
 import { useGLTF, useTexture } from '@react-three/drei';
 import * as THREE from 'three';
 import {
   MODEL_PATH, TEXTURE_BASE,
   WALK_ANIM, IDLE_ANIM,
-  SIT_START_ANIM, SIT_LOOP_ANIM, SIT_END_ANIM, SCRATCH_ANIM,
+  SIT_START_ANIM, SIT_IDLE_ANIM, SIT_END_ANIM, SCRATCH_ANIM, PET_STAND_ANIM,
   JUMP_START_ANIM, JUMP_AIR_ANIM, JUMP_LAND_ANIM,
   JUMP_START_MOVE_ANIM, JUMP_AIR_MOVE_ANIM, JUMP_LAND_MOVE_ANIM,
   SIT_DELAY, BLEND_TIME, JUMP_BLEND_TIME,
-  SCRATCH_INTERVAL_MIN, SCRATCH_INTERVAL_MAX,
   MOVE_SPEED, MODEL_Y_OFFSET, ROTATION_SPEED, MIN_SPEED_FOR_WALK,
   EDGE_MARGIN, PLAY_AREA_FAR_Z,
   type SitState,
@@ -28,6 +27,7 @@ const _inputVec2 = new THREE.Vector2();
 const ModelController = () => {
   const { scene, animations } = useGLTF(MODEL_PATH, true);
   const modelRef = useRef<THREE.Group>(null);
+  const { camera, gl } = useThree();
 
   const [albedo, normal, roughness, ao] = useTexture([
     `${TEXTURE_BASE}/Spitz_Albedo3.png`,
@@ -40,19 +40,16 @@ const ModelController = () => {
   const mixerRef = useRef<THREE.AnimationMixer | null>(null);
   const actionsRef = useRef<AnimationActions>({
     walk: null, idle: null,
-    sitStart: null, sitLoop: null, sitEnd: null,
+    sitStart: null, sitIdle: null, sitEnd: null,
     jumpStart: null, jumpAir: null, jumpLand: null,
     jumpStartMove: null, jumpAirMove: null, jumpLandMove: null,
-    scratch: null,
+    scratch: null, petStand: null,
   });
 
   // ── State refs ─────────────────────────────────────────────────────────────
-  const sitStateRef = useRef<SitState>('sit_loop');
+  const sitStateRef = useRef<SitState>('idle');
   const idleTimeRef = useRef(0);
   const animationWeightRef = useRef(0);
-  const scratchTimerRef = useRef(
-    SCRATCH_INTERVAL_MIN + Math.random() * (SCRATCH_INTERVAL_MAX - SCRATCH_INTERVAL_MIN)
-  );
 
   // ── Movement refs ──────────────────────────────────────────────────────────
   const ndcPosRef = useRef(new THREE.Vector2(0, -0.5));
@@ -68,6 +65,8 @@ const ModelController = () => {
   const jumpPressedRef = useRef(false);
 
   // ── Jump refs ──────────────────────────────────────────────────────────────
+  const petTriggeredRef = useRef(false);
+
   const jumpReturnBlendRef = useRef(0);
   const jumpVelocityRef = useRef(new THREE.Vector2(0, 0));
   const jumpAirTimeRef = useRef(0);
@@ -81,6 +80,7 @@ const ModelController = () => {
     albedo.colorSpace = THREE.SRGBColorSpace;
     scene.traverse((obj) => {
       if (!(obj instanceof THREE.Mesh)) return;
+      obj.frustumCulled = false; // required for skinned mesh raycasting
       const mat = obj.material as THREE.MeshStandardMaterial;
       mat.map = albedo;
       mat.normalMap = normal;
@@ -98,7 +98,7 @@ const ModelController = () => {
     const walkClip       = find(WALK_ANIM);
     const idleClip       = find(IDLE_ANIM);
     const sitStartClip   = find(SIT_START_ANIM);
-    const sitLoopClip    = find(SIT_LOOP_ANIM);
+    const sitIdleClip    = find(SIT_IDLE_ANIM);
     const sitEndClip     = find(SIT_END_ANIM);
     const jumpStartClip  = find(JUMP_START_ANIM);
     const jumpAirClip    = find(JUMP_AIR_ANIM);
@@ -107,10 +107,12 @@ const ModelController = () => {
     const jumpAirMoveClip   = find(JUMP_AIR_MOVE_ANIM);
     const jumpLandMoveClip  = find(JUMP_LAND_MOVE_ANIM);
     const scratchClip    = find(SCRATCH_ANIM);
+    const petStandClip   = find(PET_STAND_ANIM);
 
-    if (!walkClip || !idleClip || !sitStartClip || !sitLoopClip || !sitEndClip ||
+    if (!walkClip || !idleClip || !sitStartClip || !sitIdleClip || !sitEndClip ||
         !jumpStartClip || !jumpAirClip || !jumpLandClip ||
-        !jumpStartMoveClip || !jumpAirMoveClip || !jumpLandMoveClip || !scratchClip) return;
+        !jumpStartMoveClip || !jumpAirMoveClip || !jumpLandMoveClip ||
+        !scratchClip || !petStandClip) return;
 
     const mixer = new THREE.AnimationMixer(scene);
 
@@ -126,9 +128,9 @@ const ModelController = () => {
     sitStartAction.setLoop(THREE.LoopOnce, 1);
     sitStartAction.clampWhenFinished = true;
 
-    const sitLoopAction = mixer.clipAction(sitLoopClip);
-    sitLoopAction.setEffectiveWeight(1);
-    sitLoopAction.play();
+    const sitIdleAction = mixer.clipAction(sitIdleClip);
+    sitIdleAction.setEffectiveWeight(0);
+    sitIdleAction.play();
 
     const sitEndAction = mixer.clipAction(sitEndClip);
     sitEndAction.setLoop(THREE.LoopOnce, 1);
@@ -165,6 +167,11 @@ const ModelController = () => {
     scratchAction.setLoop(THREE.LoopOnce, 1);
     scratchAction.clampWhenFinished = true;
 
+    const petStandAction = mixer.clipAction(petStandClip);
+    petStandAction.setLoop(THREE.LoopOnce, 1);
+    petStandAction.clampWhenFinished = true;
+    petStandAction.timeScale = 1.5;
+
     const onFinished = (e: { action: THREE.AnimationAction }) => {
       const a = actionsRef.current;
       if (e.action === a.sitStart && sitStateRef.current === 'sit_start') {
@@ -186,7 +193,10 @@ const ModelController = () => {
         landingSpeedRef.current = 0.4;
       } else if (e.action === a.scratch && sitStateRef.current === 'scratch') {
         sitStateRef.current = 'sit_loop';
-        scratchTimerRef.current = SCRATCH_INTERVAL_MIN + Math.random() * (SCRATCH_INTERVAL_MAX - SCRATCH_INTERVAL_MIN);
+      } else if (e.action === a.petStand && sitStateRef.current === 'pet') {
+        sitStateRef.current = 'idle';
+        animationWeightRef.current = 0;
+        idleTimeRef.current = 0;
       }
     };
     mixer.addEventListener('finished', onFinished);
@@ -194,10 +204,10 @@ const ModelController = () => {
     mixerRef.current = mixer;
     actionsRef.current = {
       walk: walkAction, idle: idleAction,
-      sitStart: sitStartAction, sitLoop: sitLoopAction, sitEnd: sitEndAction,
+      sitStart: sitStartAction, sitIdle: sitIdleAction, sitEnd: sitEndAction,
       jumpStart: jumpStartAction, jumpAir: jumpAirAction, jumpLand: jumpLandAction,
       jumpStartMove: jumpStartMoveAction, jumpAirMove: jumpAirMoveAction, jumpLandMove: jumpLandMoveAction,
-      scratch: scratchAction,
+      scratch: scratchAction, petStand: petStandAction,
     };
 
     return () => {
@@ -206,10 +216,10 @@ const ModelController = () => {
       mixerRef.current = null;
       actionsRef.current = {
         walk: null, idle: null,
-        sitStart: null, sitLoop: null, sitEnd: null,
+        sitStart: null, sitIdle: null, sitEnd: null,
         jumpStart: null, jumpAir: null, jumpLand: null,
         jumpStartMove: null, jumpAirMove: null, jumpLandMove: null,
-        scratch: null,
+        scratch: null, petStand: null,
       };
       sitStateRef.current = 'idle';
       idleTimeRef.current = 0;
@@ -250,6 +260,37 @@ const ModelController = () => {
     window.triggerJump = () => { jumpPressedRef.current = true; };
     return () => { window.triggerJump = undefined; };
   }, []);
+
+  // Click / tap to pet the model
+  useEffect(() => {
+    const pettableStates: SitState[] = ['idle', 'sit_loop'];
+    const handleInteract = (clientX: number, clientY: number) => {
+      if (!modelRef.current) return;
+      const canvas = gl.domElement;
+      const rect = canvas.getBoundingClientRect();
+      const ndc = new THREE.Vector2(
+        ((clientX - rect.left) / rect.width) * 2 - 1,
+        -((clientY - rect.top) / rect.height) * 2 + 1
+      );
+      const ray = new THREE.Raycaster();
+      ray.setFromCamera(ndc, camera);
+      const hits = ray.intersectObject(modelRef.current, true);
+      if (hits.length > 0 && pettableStates.includes(sitStateRef.current)) {
+        petTriggeredRef.current = true;
+      }
+    };
+    const onMouseUp = (e: MouseEvent) => handleInteract(e.clientX, e.clientY);
+    const onTouchEnd = (e: TouchEvent) => {
+      const t = e.changedTouches[0];
+      if (t) handleInteract(t.clientX, t.clientY);
+    };
+    gl.domElement.addEventListener('mouseup', onMouseUp);
+    gl.domElement.addEventListener('touchend', onTouchEnd);
+    return () => {
+      gl.domElement.removeEventListener('mouseup', onMouseUp);
+      gl.domElement.removeEventListener('touchend', onTouchEnd);
+    };
+  }, [camera, gl]);
 
   // ── Frame loop ─────────────────────────────────────────────────────────────
   useFrame((state, delta) => {
@@ -327,7 +368,22 @@ const ModelController = () => {
       worldPosRef.current.copy(_groundPoint);
     }
 
-    // 7. Jump trigger
+    // 7. Pet / scratch trigger
+    if (petTriggeredRef.current) {
+      petTriggeredRef.current = false;
+      if (sitStateRef.current === 'idle') {
+        sitStateRef.current = 'pet';
+        animationWeightRef.current = 0;
+        idleTimeRef.current = 0;
+        a.petStand?.reset().play();
+      } else if (sitStateRef.current === 'sit_loop') {
+        sitStateRef.current = 'scratch';
+        animationWeightRef.current = 0;
+        a.scratch?.reset().play();
+      }
+    }
+
+    // 8. Jump trigger
     if (jumpPressedRef.current) {
       jumpPressedRef.current = false;
       if (sitStateRef.current === 'idle') {
@@ -381,18 +437,10 @@ const ModelController = () => {
         animationWeightRef.current = 0;
       }
     } else if (sitState === 'sit_loop') {
-      if (a.sitLoop && !a.sitLoop.isRunning()) a.sitLoop.reset().play();
-      setWeights(a, { sitLoop: 1 });
+      setWeights(a, { sitIdle: 1 });
       if (hasInput) {
         sitStateRef.current = 'sit_end';
         a.sitEnd?.reset().play();
-      } else {
-        scratchTimerRef.current -= delta;
-        if (scratchTimerRef.current <= 0) {
-          sitStateRef.current = 'scratch';
-          animationWeightRef.current = 0;
-          a.scratch?.reset().play();
-        }
       }
     } else if (sitState === 'sit_end') {
       setWeights(a, { sitEnd: 1 });
@@ -407,12 +455,14 @@ const ModelController = () => {
       } else {
         scratchWeight = Math.max(0, 1 - (scratchProgress - BLEND_OUT_START) / (1 - BLEND_OUT_START));
       }
-      setWeights(a, { sitLoop: 1 - scratchWeight, scratch: scratchWeight });
+      setWeights(a, { sitIdle: 1 - scratchWeight, scratch: scratchWeight });
       if (hasInput) {
         sitStateRef.current = 'sit_end';
         a.sitEnd?.reset().play();
-        scratchTimerRef.current = SCRATCH_INTERVAL_MIN + Math.random() * (SCRATCH_INTERVAL_MAX - SCRATCH_INTERVAL_MIN);
       }
+    } else if (sitState === 'pet') {
+      animationWeightRef.current = Math.min(1, animationWeightRef.current + delta / BLEND_TIME);
+      setWeights(a, { idle: 1 - animationWeightRef.current, petStand: animationWeightRef.current });
     } else if (sitState === 'jump_start') {
       animationWeightRef.current = Math.min(1, animationWeightRef.current + delta / JUMP_BLEND_TIME);
       setWeights(a, {

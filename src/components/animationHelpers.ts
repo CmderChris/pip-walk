@@ -4,7 +4,7 @@ export type AnimationActions = {
   walk: THREE.AnimationAction | null;
   idle: THREE.AnimationAction | null;
   sitStart: THREE.AnimationAction | null;
-  sitLoop: THREE.AnimationAction | null;
+  sitIdle: THREE.AnimationAction | null;
   sitEnd: THREE.AnimationAction | null;
   jumpStart: THREE.AnimationAction | null;
   jumpAir: THREE.AnimationAction | null;
@@ -13,6 +13,7 @@ export type AnimationActions = {
   jumpAirMove: THREE.AnimationAction | null;
   jumpLandMove: THREE.AnimationAction | null;
   scratch: THREE.AnimationAction | null;
+  petStand: THREE.AnimationAction | null;
 };
 
 /**
