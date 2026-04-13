@@ -2,15 +2,16 @@ import { useEffect } from 'react'
 import './App.css'
 
 import Scene from './components/Scene'
-import { createJoystick } from './components/JoystickOverlay';
+import { createJoystick, createJumpButton } from './components/ButtonOverlay';
 
 const App = () => {
   useEffect(() => {
-    // Create the joystick and get cleanup function
     const cleanupJoystick = createJoystick();
-    
-    // Clean up on unmount
-    return cleanupJoystick;
+    const cleanupJumpButton = createJumpButton();
+    return () => {
+      cleanupJoystick();
+      cleanupJumpButton();
+    };
   }, []);
 
   return (
@@ -25,6 +26,7 @@ export default App
 declare global {
   interface Window {
     updateJoystick?: (x: number, y: number) => void;
+    triggerJump?: () => void;
   }
 }
 

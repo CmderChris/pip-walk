@@ -137,3 +137,64 @@ export const createJoystick = () => {
     window.removeEventListener('touchend', handleWindowTouchEnd);
   };
 };
+
+export const createJumpButton = () => {
+  const container = document.createElement('div');
+  container.style.position = 'fixed';
+  container.style.bottom = '20px';
+  container.style.right = '20px';
+  container.style.width = '80px';
+  container.style.height = '80px';
+  container.style.borderRadius = '50%';
+  container.style.backgroundColor = 'rgba(50, 50, 50, 0.5)';
+  container.style.display = 'flex';
+  container.style.alignItems = 'center';
+  container.style.justifyContent = 'center';
+  container.style.zIndex = '1000';
+  container.style.touchAction = 'none';
+  container.style.userSelect = 'none';
+  container.style.cursor = 'pointer';
+
+  const knob = document.createElement('div');
+  knob.style.width = '55px';
+  knob.style.height = '55px';
+  knob.style.borderRadius = '50%';
+  knob.style.backgroundColor = 'rgba(200, 200, 200, 0.8)';
+  knob.style.display = 'flex';
+  knob.style.alignItems = 'center';
+  knob.style.justifyContent = 'center';
+  knob.style.fontSize = '22px';
+  knob.style.lineHeight = '1';
+  knob.style.transition = 'background-color 0.05s';
+  knob.textContent = '↑';
+
+  container.appendChild(knob);
+  document.body.appendChild(container);
+
+  const press = () => {
+    knob.style.backgroundColor = 'rgba(140, 140, 140, 0.9)';
+    if (window.triggerJump) window.triggerJump();
+  };
+
+  const release = () => {
+    knob.style.backgroundColor = 'rgba(200, 200, 200, 0.8)';
+  };
+
+  const handleMouseUp = release;
+  const handleTouchEnd = release;
+
+  container.addEventListener('mousedown', press);
+  window.addEventListener('mouseup', handleMouseUp);
+
+  container.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    press();
+  }, { passive: false });
+  window.addEventListener('touchend', handleTouchEnd);
+
+  return () => {
+    document.body.removeChild(container);
+    window.removeEventListener('mouseup', handleMouseUp);
+    window.removeEventListener('touchend', handleTouchEnd);
+  };
+};
