@@ -16,6 +16,8 @@ import {
 } from './modelConfig';
 import { setWeights, type AnimationActions } from './animationHelpers';
 
+const isMobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+
 // Pre-allocated — never created per frame
 const _raycaster = new THREE.Raycaster();
 const _groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -28,7 +30,9 @@ const _inputVec2 = new THREE.Vector2();
 const ModelController = () => {
   const { scene, animations } = useGLTF(MODEL_PATH, true);
   const modelRef = useRef<THREE.Group>(null);
-  const { camera, gl } = useThree();
+  const shadowLightRef = useRef<THREE.DirectionalLight>(null!);
+  const { camera, gl, scene: threeScene } = useThree();
+
 
   const [albedo, normal, roughness, ao] = useTexture([
     `${TEXTURE_BASE}/Spitz_Albedo3.png`,
@@ -48,7 +52,7 @@ const ModelController = () => {
   });
 
   // ── State refs ─────────────────────────────────────────────────────────────
-  const sitStateRef = useRef<SitState>('idle');
+  const sitStateRef = useRef<SitState>('sit_loop');
   const idleTimeRef = useRef(0);
   const animationWeightRef = useRef(0);
   const sitLoop2TimerRef = useRef(
@@ -56,7 +60,7 @@ const ModelController = () => {
   );
 
   // ── Movement refs ──────────────────────────────────────────────────────────
-  const ndcPosRef = useRef(new THREE.Vector2(0, -0.5));
+  const ndcPosRef = useRef(new THREE.Vector2(0, -0.3));
   const worldPosRef = useRef(new THREE.Vector3(0, 0, 0));
   const currentSpeedRef = useRef(0);
   const targetRotationRef = useRef(0);
@@ -67,6 +71,10 @@ const ModelController = () => {
   const keysPressedRef = useRef({ w: false, a: false, s: false, d: false });
   const joystickRef = useRef({ x: 0, y: 0 });
   const jumpPressedRef = useRef(false);
+
+  const jumpLiftRef = useRef(0);
+  const jumpStartLiftCurveRef = useRef<Float32Array | null>(null);
+  const jumpStartMoveLiftCurveRef = useRef<Float32Array | null>(null);
 
   // ── Jump refs ──────────────────────────────────────────────────────────────
   const petTriggeredRef = useRef(false);
@@ -85,6 +93,13 @@ const ModelController = () => {
     scene.traverse((obj) => {
       if (!(obj instanceof THREE.Mesh)) return;
       obj.frustumCulled = false; // required for skinned mesh raycasting
+      obj.castShadow = true;
+      // Expand bounding sphere to cover all animation poses so shadow-pass
+      // frustum culling never clips animated extremities (e.g. hind paws).
+      obj.geometry.computeBoundingSphere();
+      if (obj.geometry.boundingSphere) {
+        obj.geometry.boundingSphere.radius *= 2.0;
+      }
       const mat = obj.material as THREE.MeshStandardMaterial;
       mat.map = albedo;
       mat.normalMap = normal;
@@ -93,6 +108,14 @@ const ModelController = () => {
       mat.needsUpdate = true;
     });
   }, [scene, albedo, normal, roughness, ao]);
+
+  // ── Add shadow light target to scene graph ────────────────────────────────
+  useEffect(() => {
+    const light = shadowLightRef.current;
+    if (!light) return;
+    threeScene.add(light.target);
+    return () => { threeScene.remove(light.target); };
+  }, [threeScene]);
 
   // ── Animation setup ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -119,6 +142,35 @@ const ModelController = () => {
         !jumpStartMoveClip || !jumpAirMoveClip || !jumpLandMoveClip ||
         !scratchClip || !sitLoop2Clip || !petStandClip) return;
 
+    // Pre-sample jump start clips to build a per-frame lift correction curve
+    const TOE_OFFSET = 0.08;
+    const SAMPLES = 60;
+    const buildLiftCurve = (clip: THREE.AnimationClip): Float32Array => {
+      const tmpMixer = new THREE.AnimationMixer(scene);
+      const action = tmpMixer.clipAction(clip);
+      action.play();
+      const curve = new Float32Array(SAMPLES);
+      for (let i = 0; i < SAMPLES; i++) {
+        const t = (i / (SAMPLES - 1)) * clip.duration;
+        tmpMixer.setTime(t);
+        scene.updateMatrixWorld(true);
+        let minY = Infinity;
+        scene.traverse((obj) => {
+          if (obj instanceof THREE.Bone) {
+            _tempVec3.setFromMatrixPosition(obj.matrixWorld);
+            if (_tempVec3.y < minY) minY = _tempVec3.y;
+          }
+        });
+        curve[i] = minY < TOE_OFFSET ? TOE_OFFSET - minY : 0;
+      }
+      tmpMixer.stopAllAction();
+      // Reset scene position after sampling
+      scene.position.set(0, MODEL_Y_OFFSET, 0);
+      return curve;
+    };
+    jumpStartLiftCurveRef.current = buildLiftCurve(jumpStartClip);
+    jumpStartMoveLiftCurveRef.current = buildLiftCurve(jumpStartMoveClip);
+
     const mixer = new THREE.AnimationMixer(scene);
 
     const idleAction = mixer.clipAction(idleClip);
@@ -134,7 +186,7 @@ const ModelController = () => {
     sitStartAction.clampWhenFinished = true;
 
     const sitIdleAction = mixer.clipAction(sitIdleClip);
-    sitIdleAction.setEffectiveWeight(0);
+    sitIdleAction.setEffectiveWeight(1);
     sitIdleAction.play();
 
     const sitEndAction = mixer.clipAction(sitEndClip);
@@ -400,6 +452,7 @@ const ModelController = () => {
       jumpPressedRef.current = false;
       if (sitStateRef.current === 'idle') {
         sitStateRef.current = 'jump_start';
+        jumpLiftRef.current = 0.4;
         animationWeightRef.current = 0;
         idleTimeRef.current = 0;
         jumpAirTimeRef.current = 0;
@@ -551,12 +604,34 @@ const ModelController = () => {
     if (activeState === 'jump_air' || activeState === 'jump_land') {
       const progress = Math.min(1, jumpAirTimeRef.current / jumpTotalDurationRef.current);
       const maxLift = jumpIsMovingRef.current ? 0.3 : 0.25;
-      scene.position.set(0, MODEL_Y_OFFSET + Math.max(0, maxLift * Math.sin(progress * Math.PI)), 0);
+      const arcLift = Math.max(0, maxLift * Math.sin(progress * Math.PI));
+      // Exponentially decay residual lift from jump_start
+      jumpLiftRef.current *= Math.exp(-delta * 15);
+      scene.position.set(0, MODEL_Y_OFFSET + arcLift + jumpLiftRef.current, 0);
+    } else if (activeState === 'jump_start') {
+      const curve = jumpIsMovingRef.current ? jumpStartMoveLiftCurveRef.current : jumpStartLiftCurveRef.current;
+      const action = jumpIsMovingRef.current ? actionsRef.current.jumpStartMove : actionsRef.current.jumpStart;
+      if (curve && action) {
+        const progress = Math.min(1, action.time / action.getClip().duration);
+        const idx = Math.min(curve.length - 1, Math.floor(progress * curve.length));
+        scene.position.set(0, MODEL_Y_OFFSET + curve[idx], 0);
+      } else {
+        scene.position.set(0, MODEL_Y_OFFSET, 0);
+      }
     } else {
+      jumpLiftRef.current = 0;
       scene.position.set(0, MODEL_Y_OFFSET, 0);
     }
 
-    // 10. Apply world position and rotation to mesh
+    // 10. Fixed sun position — shadow angle/length changes as model moves
+    if (shadowLightRef.current) {
+      shadowLightRef.current.position.set(0, 35, -60);
+      shadowLightRef.current.target.position.copy(worldPosRef.current);
+      shadowLightRef.current.target.updateMatrixWorld();
+      shadowLightRef.current.shadow.needsUpdate = sitStateRef.current !== 'sit_loop';
+    }
+
+    // 11. Apply world position and rotation to mesh
     if (modelRef.current) {
       modelRef.current.position.copy(worldPosRef.current);
 
@@ -578,9 +653,25 @@ const ModelController = () => {
   });
 
   return (
-    <group ref={modelRef}>
-      <primitive object={scene} scale={4.0} />
-    </group>
+    <>
+      <directionalLight
+        ref={shadowLightRef}
+        intensity={1.5}
+        castShadow
+        shadow-mapSize={isMobile ? [512, 512] : [2048, 2048]}
+        shadow-camera-near={1}
+        shadow-camera-far={120}
+        shadow-camera-left={-30}
+        shadow-camera-right={30}
+        shadow-camera-top={30}
+        shadow-camera-bottom={-30}
+        shadow-bias={-0.0005}
+        shadow-normalBias={0.05}
+      />
+      <group ref={modelRef}>
+        <primitive object={scene} scale={4.0} />
+      </group>
+    </>
   );
 };
 

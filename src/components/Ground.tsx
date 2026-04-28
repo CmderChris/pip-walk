@@ -1,49 +1,41 @@
-import React, { useLayoutEffect, useMemo, useRef } from 'react'
-// import { createNoise2D } from 'simplex-noise'
+import React, { useMemo } from 'react'
 import * as THREE from 'three'
+import { useTexture } from '@react-three/drei';
+import { useThree } from '@react-three/fiber';
 
-import { SimplexNoise } from 'three/examples/jsm/Addons.js';
+const TILE_REPEAT = 100;
+
+const TEXTURES = [
+  '/textures/wispy-grass-meadow_albedo.png',
+  '/textures/wispy-grass-meadow_normal-ogl.png',
+  '/textures/wispy-grass-meadow_ao.png',
+  '/textures/wispy-grass-meadow_roughness.png',
+];
 
 const Ground: React.FC = () => {
-  const simplex = useMemo(() => new SimplexNoise(), []);
+  const { gl } = useThree();
+  const [albedo, normal, ao, roughness] = useTexture(TEXTURES);
 
-  const terrain = useRef<THREE.PlaneGeometry>(null!);
-
-  useLayoutEffect(() => {
-    const pos = terrain.current.getAttribute('position');
-    const pa = pos.array;
-
-    const hVerts = terrain.current.parameters.heightSegments + 1;
-    const wVerts = terrain.current.parameters.widthSegments + 1;
-
-    for (let j = 0; j < hVerts; j++) {
-      for (let i = 0; i < wVerts; i++) {
-        const ex = Math.random() * 1.3;
-
-        pa[3 * (j * wVerts + i) + 2] =
-          (simplex.noise(i / 100, j / 100) +
-            simplex.noise((i + 200) / 50, j / 50) * Math.pow(ex, 1) +
-            simplex.noise((i + 400) / 25, j / 25) * Math.pow(ex, 2) +
-            simplex.noise((i + 600) / 12.5, j / 12.5) * Math.pow(ex, 3) +
-            +(simplex.noise((i + 800) / 6.25, j / 6.25) * Math.pow(ex, 4))) /
-          2;
-      }
-    }
-
-    pos.needsUpdate = true;
-
-    terrain.current.computeVertexNormals();
-  });
+  useMemo(() => {
+    const maxAnisotropy = gl.capabilities.getMaxAnisotropy();
+    [albedo, normal, ao, roughness].forEach((tex) => {
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.repeat.set(TILE_REPEAT, TILE_REPEAT);
+      tex.anisotropy = maxAnisotropy;
+    });
+  }, [albedo, normal, ao, roughness, gl]);
 
   return (
-    <mesh position={[0, 0, 0]} receiveShadow rotation={[-Math.PI / 2, 0, 0]}>
-      <planeGeometry
-        attach='geometry'
-        args={[1000, 1000, 250, 250]}
-        ref={terrain}
+    <mesh receiveShadow rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.01, 0]}>
+      <planeGeometry args={[1000, 1000]} />
+      <meshStandardMaterial
+        map={albedo}
+        normalMap={normal}
+        aoMap={ao}
+        roughnessMap={roughness}
+        roughness={1}
+        metalness={0}
       />
-
-      <meshPhongMaterial attach='material' color='#69b581' />
     </mesh>
   );
 };

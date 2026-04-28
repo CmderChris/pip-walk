@@ -1,19 +1,21 @@
 import { Suspense } from 'react';
+import * as THREE from 'three';
 import { Canvas } from '@react-three/fiber';
-import { 
-  Sky, Environment
-} from '@react-three/drei';
+import { Sky, Environment } from '@react-three/drei';
 import { Physics } from '@react-three/cannon';
+import { EffectComposer, Bloom, Vignette, N8AO } from '@react-three/postprocessing';
+
+const isMobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
 
 import CameraController from './CameraController';
 import Floor from './Floor';
+import Ground from './Ground';
 import Boundaries from './Boundaries';
 import ModelController from './ModelController';
 
-// Main scene component
 const Scene = () => {
   return (
-    <div style={{ 
+    <div style={{
       position: 'fixed',
       top: 0,
       left: 0,
@@ -21,29 +23,36 @@ const Scene = () => {
       height: '100%',
       overflow: 'hidden'
     }}>
-      <Canvas shadows resize={{ scroll: false, debounce: { scroll: 50, resize: 50 } }}>
+      <Canvas shadows={{ type: THREE.PCFSoftShadowMap }} resize={{ scroll: false, debounce: { scroll: 50, resize: 50 } }}>
+        <fog attach="fog" args={['#c8d8b0', 80, 500]} />
+
         <CameraController />
-        
-        <ambientLight intensity={0.5} />
-        <directionalLight 
-          position={[10, 10, 5]} 
-          intensity={1} 
-          castShadow 
-          shadow-mapSize={[2048, 2048]}
-        />
-        
+
+        <ambientLight intensity={0.25} />
+
         <Physics>
           <Floor />
           <Boundaries />
         </Physics>
+
         <Suspense fallback={null}>
+          <Ground />
           <ModelController />
+          <EffectComposer>
+            <Bloom luminanceThreshold={0.9} intensity={0.3} mipmapBlur />
+            <Vignette offset={0.3} darkness={0.5} />
+          </EffectComposer>
+          {!isMobile && (
+            <EffectComposer>
+              <N8AO aoRadius={2} intensity={2} />
+            </EffectComposer>
+          )}
         </Suspense>
-        
-        <Sky 
-          distance={450000} 
-          sunPosition={[0, 1, 0]} 
-          inclination={0.5} 
+
+        <Sky
+          distance={450000}
+          sunPosition={[0, 1, 0]}
+          inclination={0.5}
           azimuth={0.25}
         />
         <Environment preset="park" />
@@ -52,6 +61,4 @@ const Scene = () => {
   );
 };
 
-
-export default Scene
-
+export default Scene;
