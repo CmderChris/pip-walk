@@ -50,7 +50,7 @@ const Scene = () => {
         <Suspense fallback={null}>
           <Ground />
           <ModelController />
-          <FpsTracker />
+          {import.meta.env.DEV && <FpsTracker />}
         </Suspense>
 
         <Sky
@@ -61,7 +61,7 @@ const Scene = () => {
         />
         <Environment preset="park" />
       </Canvas>
-      <FpsDisplay />
+      {import.meta.env.DEV && <FpsDisplay />}
     </div>
   );
 };
