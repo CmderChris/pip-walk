@@ -1,27 +1,37 @@
+const hasTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+
+// Size the controls relative to the shorter screen dimension so they feel
+// consistent across phones, tablets, and landscape/portrait orientations.
+// Clamped to avoid being comically large on big tablets or tiny on small phones.
+const controlSize = Math.min(130, Math.max(80, Math.round(Math.min(window.innerWidth, window.innerHeight) * 0.2)));
+
 export const createJoystick = () => {
+  if (!hasTouch) return () => {};
+
   // Create joystick container
   const joystickContainer = document.createElement('div');
   joystickContainer.style.position = 'fixed';
   joystickContainer.style.bottom = '20px';
   joystickContainer.style.left = '20px';
-  joystickContainer.style.width = '100px';
-  joystickContainer.style.height = '100px';
+  joystickContainer.style.width = `${controlSize}px`;
+  joystickContainer.style.height = `${controlSize}px`;
   joystickContainer.style.borderRadius = '50%';
   joystickContainer.style.backgroundColor = 'rgba(50, 50, 50, 0.5)';
   joystickContainer.style.display = 'flex';
   joystickContainer.style.alignItems = 'center';
   joystickContainer.style.justifyContent = 'center';
   joystickContainer.style.zIndex = '1000';
-  joystickContainer.style.touchAction = 'none'; // Prevent browser touch actions
-  
+  joystickContainer.style.touchAction = 'none';
+
   // Create joystick knob
+  const knobSize = Math.round(controlSize * 0.5);
   const joystickKnob = document.createElement('div');
-  joystickKnob.style.width = '50px';
-  joystickKnob.style.height = '50px';
+  joystickKnob.style.width = `${knobSize}px`;
+  joystickKnob.style.height = `${knobSize}px`;
   joystickKnob.style.borderRadius = '50%';
   joystickKnob.style.backgroundColor = 'rgba(200, 200, 200, 0.8)';
   joystickKnob.style.position = 'relative';
-  joystickKnob.style.touchAction = 'none'; // Prevent browser touch actions
+  joystickKnob.style.touchAction = 'none';
   
   joystickContainer.appendChild(joystickKnob);
   document.body.appendChild(joystickContainer);
@@ -139,12 +149,15 @@ export const createJoystick = () => {
 };
 
 export const createJumpButton = () => {
+  if (!hasTouch) return () => {};
+
+  const jumpSize = Math.round(controlSize * 0.85);
   const container = document.createElement('div');
   container.style.position = 'fixed';
   container.style.bottom = '20px';
   container.style.right = '20px';
-  container.style.width = '80px';
-  container.style.height = '80px';
+  container.style.width = `${jumpSize}px`;
+  container.style.height = `${jumpSize}px`;
   container.style.borderRadius = '50%';
   container.style.backgroundColor = 'rgba(50, 50, 50, 0.5)';
   container.style.display = 'flex';
@@ -155,15 +168,17 @@ export const createJumpButton = () => {
   container.style.userSelect = 'none';
   container.style.cursor = 'pointer';
 
+  const knobSize = Math.round(jumpSize * 0.72);
+  const fontSize = Math.round(knobSize * 0.4);
   const knob = document.createElement('div');
-  knob.style.width = '55px';
-  knob.style.height = '55px';
+  knob.style.width = `${knobSize}px`;
+  knob.style.height = `${knobSize}px`;
   knob.style.borderRadius = '50%';
   knob.style.backgroundColor = 'rgba(200, 200, 200, 0.8)';
   knob.style.display = 'flex';
   knob.style.alignItems = 'center';
   knob.style.justifyContent = 'center';
-  knob.style.fontSize = '22px';
+  knob.style.fontSize = `${fontSize}px`;
   knob.style.lineHeight = '1';
   knob.style.transition = 'background-color 0.05s';
   knob.textContent = '↑';

@@ -2,6 +2,7 @@ import React, { useMemo } from 'react'
 import * as THREE from 'three'
 import { useTexture } from '@react-three/drei';
 import { useThree } from '@react-three/fiber';
+import { isLowEnd } from './perfTier';
 
 const TILE_REPEAT = 100;
 
@@ -17,7 +18,7 @@ const Ground: React.FC = () => {
   const [albedo, normal, ao, roughness] = useTexture(TEXTURES);
 
   useMemo(() => {
-    const maxAnisotropy = gl.capabilities.getMaxAnisotropy();
+    const maxAnisotropy = isLowEnd ? Math.min(4, gl.capabilities.getMaxAnisotropy()) : gl.capabilities.getMaxAnisotropy();
     [albedo, normal, ao, roughness].forEach((tex) => {
       tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
       tex.repeat.set(TILE_REPEAT, TILE_REPEAT);

@@ -10,13 +10,9 @@ const Floor = () => {
   }));
 
   return (
-    <mesh ref={ref} receiveShadow>
+    <mesh ref={ref} visible={false}>
       <planeGeometry args={[FLOOR_SIZE, FLOOR_SIZE]} />
-      <meshStandardMaterial 
-        color="#3a7e4d"
-        roughness={0.8}
-        metalness={0.1}
-      />
+      <meshBasicMaterial />
     </mesh>
   );
 };

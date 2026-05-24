@@ -5,10 +5,19 @@ const CameraController = () => {
   const { camera } = useThree();
 
   useEffect(() => {
-    // Fixed overhead-angled camera looking down at the play area from the front.
-    // Adjust Y (height) and Z (distance) to frame the 40x40 unit play area as needed.
-    camera.position.set(0, 3, 16);
-    camera.lookAt(0, 0, 0);
+    const updateCamera = () => {
+      const aspect = window.innerWidth / window.innerHeight;
+      // On portrait screens the camera sees a tall vertical slice — pull it back
+      // so the model doesn't appear disproportionately large and the play area
+      // feels consistent. On landscape the standard position is used.
+      const z = aspect < 1 ? 16 + (1 - aspect) * 10 : 16;
+      camera.position.set(0, 3, z);
+      camera.lookAt(0, 0, 0);
+    };
+
+    updateCamera();
+    window.addEventListener('resize', updateCamera);
+    return () => window.removeEventListener('resize', updateCamera);
   }, [camera]);
 
   return null;

@@ -16,7 +16,7 @@ import {
 } from './modelConfig';
 import { setWeights, type AnimationActions } from './animationHelpers';
 
-const isMobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+import { isLowEnd } from './perfTier';
 
 // Pre-allocated — never created per frame
 const _raycaster = new THREE.Raycaster();
@@ -62,6 +62,7 @@ const ModelController = () => {
   // ── Movement refs ──────────────────────────────────────────────────────────
   const ndcPosRef = useRef(new THREE.Vector2(0, -0.3));
   const worldPosRef = useRef(new THREE.Vector3(0, 0, 0));
+  const positionInitializedRef = useRef(false);
   const currentSpeedRef = useRef(0);
   const targetRotationRef = useRef(0);
   const moveSpeedRef = useRef(0);
@@ -361,12 +362,20 @@ const ModelController = () => {
     const cam = state.camera as THREE.PerspectiveCamera;
     const a = actionsRef.current;
 
-    // 1. NDC boundary for far edge of play area
-    _tempVec3.set(0, 0, PLAY_AREA_FAR_Z);
-    _tempVec3.project(cam);
-    const farNDCY = _tempVec3.y;
+    // 0. One-time sync: unproject the initial NDC position so worldPosRef matches
+    //    where the model actually appears on screen from frame one.
+    //    Without this, worldPosRef starts at (0,0,0) while ndcPosRef is (0,-0.3),
+    //    causing a teleport on the first move.
+    if (!positionInitializedRef.current) {
+      positionInitializedRef.current = true;
+      _raycaster.setFromCamera(ndcPosRef.current, cam);
+      if (_raycaster.ray.intersectPlane(_groundPlane, _groundPoint)) {
+        _groundPoint.y = 0;
+        worldPosRef.current.copy(_groundPoint);
+      }
+    }
 
-    // 2. Input
+    // 1. Input
     const keys = keysPressedRef.current;
     const joystick = joystickRef.current;
     _inputVec2.set(
@@ -377,59 +386,67 @@ const ModelController = () => {
     const isAirborne = sitStateRef.current === 'jump_start' || sitStateRef.current === 'jump_air';
     const isLanding = sitStateRef.current === 'jump_land';
     const canMove = hasInput && (sitStateRef.current === 'idle' || isLanding);
+    const hasJumpVelocity = jumpVelocityRef.current.lengthSq() > 0.00001;
 
-    // 3. Perspective probes — world-units-per-NDC at current position
-    const PROBE = 0.001;
-    const cx = ndcPosRef.current.x;
-    const cy = ndcPosRef.current.y;
+    // 2–6. Position — all raycasts skipped when model is stationary.
+    // The NDC boundary projection, 3 perspective probes, and world unproject
+    // are only needed when the model is actually moving.
+    if (canMove || (isAirborne && hasJumpVelocity)) {
+      // NDC boundary for far edge (only needed for clamping)
+      _tempVec3.set(0, 0, PLAY_AREA_FAR_Z);
+      _tempVec3.project(cam);
+      const farNDCY = _tempVec3.y;
 
-    _raycaster.setFromCamera(ndcPosRef.current, cam);
-    _raycaster.ray.intersectPlane(_groundPlane, _groundPoint);
+      // Perspective probes — world-units-per-NDC at current position
+      const PROBE = 0.001;
+      const cx = ndcPosRef.current.x;
+      const cy = ndcPosRef.current.y;
 
-    _ndcSample.set(cx + PROBE, cy);
-    _raycaster.setFromCamera(_ndcSample, cam);
-    _raycaster.ray.intersectPlane(_groundPlane, _probePoint);
-    const worldPerNdcX = _probePoint.distanceTo(_groundPoint) / PROBE;
+      _raycaster.setFromCamera(ndcPosRef.current, cam);
+      _raycaster.ray.intersectPlane(_groundPlane, _groundPoint);
 
-    _ndcSample.set(cx, cy + PROBE);
-    _raycaster.setFromCamera(_ndcSample, cam);
-    _raycaster.ray.intersectPlane(_groundPlane, _probePoint);
-    const worldPerNdcY = _probePoint.distanceTo(_groundPoint) / PROBE;
+      _ndcSample.set(cx + PROBE, cy);
+      _raycaster.setFromCamera(_ndcSample, cam);
+      _raycaster.ray.intersectPlane(_groundPlane, _probePoint);
+      const worldPerNdcX = _probePoint.distanceTo(_groundPoint) / PROBE;
 
-    // 4. Movement
-    if (canMove) {
-      _inputVec2.normalize();
-      moveSpeedRef.current = Math.min(1, moveSpeedRef.current + delta * 6);
-      landingSpeedRef.current = Math.min(1, landingSpeedRef.current + delta * 8);
-      const spd = MOVE_SPEED * delta * moveSpeedRef.current * landingSpeedRef.current;
-      ndcPosRef.current.x += _inputVec2.x * (spd / Math.max(worldPerNdcX, 0.001));
-      ndcPosRef.current.y += _inputVec2.y * (spd / Math.max(worldPerNdcY, 0.001));
-      jumpVelocityRef.current.copy(_inputVec2);
-    } else if (isAirborne && jumpVelocityRef.current.lengthSq() > 0.00001) {
-      const spd = MOVE_SPEED * delta * moveSpeedRef.current;
-      ndcPosRef.current.x += jumpVelocityRef.current.x * (spd / Math.max(worldPerNdcX, 0.001));
-      ndcPosRef.current.y += jumpVelocityRef.current.y * (spd / Math.max(worldPerNdcY, 0.001));
-    } else if (!isAirborne && !isLanding) {
-      moveSpeedRef.current = 0;
-      jumpVelocityRef.current.set(0, 0);
-    }
+      _ndcSample.set(cx, cy + PROBE);
+      _raycaster.setFromCamera(_ndcSample, cam);
+      _raycaster.ray.intersectPlane(_groundPlane, _probePoint);
+      const worldPerNdcY = _probePoint.distanceTo(_groundPoint) / PROBE;
 
-    // 5. Clamp NDC to play area
-    ndcPosRef.current.x = Math.max(-1 + EDGE_MARGIN, Math.min(1 - EDGE_MARGIN, ndcPosRef.current.x));
-    ndcPosRef.current.y = Math.max(-1 + EDGE_MARGIN, Math.min(farNDCY - EDGE_MARGIN, ndcPosRef.current.y));
+      if (canMove) {
+        _inputVec2.normalize();
+        moveSpeedRef.current = Math.min(1, moveSpeedRef.current + delta * 6);
+        landingSpeedRef.current = Math.min(1, landingSpeedRef.current + delta * 8);
+        const spd = MOVE_SPEED * delta * moveSpeedRef.current * landingSpeedRef.current;
+        ndcPosRef.current.x += _inputVec2.x * (spd / Math.max(worldPerNdcX, 0.001));
+        ndcPosRef.current.y += _inputVec2.y * (spd / Math.max(worldPerNdcY, 0.001));
+        jumpVelocityRef.current.copy(_inputVec2);
+      } else {
+        const spd = MOVE_SPEED * delta * moveSpeedRef.current;
+        ndcPosRef.current.x += jumpVelocityRef.current.x * (spd / Math.max(worldPerNdcX, 0.001));
+        ndcPosRef.current.y += jumpVelocityRef.current.y * (spd / Math.max(worldPerNdcY, 0.001));
+      }
 
-    // 6. Unproject NDC → world position
-    _raycaster.setFromCamera(ndcPosRef.current, cam);
-    if (_raycaster.ray.intersectPlane(_groundPlane, _groundPoint)) {
-      _groundPoint.y = 0;
-      if (canMove || (isAirborne && jumpVelocityRef.current.lengthSq() > 0.00001)) {
+      // Clamp NDC to play area
+      ndcPosRef.current.x = Math.max(-1 + EDGE_MARGIN, Math.min(1 - EDGE_MARGIN, ndcPosRef.current.x));
+      ndcPosRef.current.y = Math.max(-1 + EDGE_MARGIN, Math.min(farNDCY - EDGE_MARGIN, ndcPosRef.current.y));
+
+      // Unproject NDC → world position
+      _raycaster.setFromCamera(ndcPosRef.current, cam);
+      if (_raycaster.ray.intersectPlane(_groundPlane, _groundPoint)) {
+        _groundPoint.y = 0;
         const dx = _groundPoint.x - worldPosRef.current.x;
         const dz = _groundPoint.z - worldPosRef.current.z;
         if (Math.abs(dx) > 0.0001 || Math.abs(dz) > 0.0001) {
           targetRotationRef.current = Math.atan2(dx, dz);
         }
+        worldPosRef.current.copy(_groundPoint);
       }
-      worldPosRef.current.copy(_groundPoint);
+    } else if (!isAirborne && !isLanding) {
+      moveSpeedRef.current = 0;
+      jumpVelocityRef.current.set(0, 0);
     }
 
     // 7. Pet / scratch trigger
@@ -657,8 +674,8 @@ const ModelController = () => {
       <directionalLight
         ref={shadowLightRef}
         intensity={1.5}
-        castShadow
-        shadow-mapSize={isMobile ? [512, 512] : [2048, 2048]}
+        castShadow={!isLowEnd}
+        shadow-mapSize={[2048, 2048]}
         shadow-camera-near={1}
         shadow-camera-far={120}
         shadow-camera-left={-30}
