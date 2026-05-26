@@ -17,6 +17,7 @@ import {
 import { setWeights, type AnimationActions } from './animationHelpers';
 
 import { isLowEnd } from './perfTier';
+import { modelWorldPos, modelSitAmountRef } from './modelState';
 
 // Pre-allocated — never created per frame
 const _raycaster = new THREE.Raycaster();
@@ -651,6 +652,9 @@ const ModelController = () => {
     // 11. Apply world position and rotation to mesh
     if (modelRef.current) {
       modelRef.current.position.copy(worldPosRef.current);
+      modelWorldPos.copy(worldPosRef.current);
+      const s = sitStateRef.current;
+      modelSitAmountRef.value = (s === 'sit_loop' || s === 'sit_loop2' || s === 'sit_start' || s === 'scratch') ? 1 : 0;
 
       if (currentSpeedRef.current > MIN_SPEED_FOR_WALK) {
         const currentRotation = modelRef.current.rotation.y;

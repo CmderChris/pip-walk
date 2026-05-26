@@ -9,6 +9,7 @@ import { isLowEnd } from './perfTier';
 import CameraController from './CameraController';
 import Floor from './Floor';
 import Ground from './Ground';
+import Grass from './Grass';
 import Boundaries from './Boundaries';
 import ModelController from './ModelController';
 import { FpsTracker, FpsDisplay } from './FpsCounter';
@@ -28,7 +29,7 @@ const Scene = () => {
         dpr={isLowEnd ? 1 : [1, 2]}
         resize={{ scroll: false, debounce: { scroll: 50, resize: 50 } }}
       >
-        <fog attach="fog" args={['#c8d8b0', 80, 500]} />
+        <fog attach="fog" args={['#c8d8b0', 80, 360]} />
 
         <CameraController />
 
@@ -49,6 +50,7 @@ const Scene = () => {
 
         <Suspense fallback={null}>
           <Ground />
+          <Grass />
           <ModelController />
           {import.meta.env.DEV && <FpsTracker />}
         </Suspense>
