@@ -16,8 +16,7 @@ import {
 } from './modelConfig';
 import { setWeights, type AnimationActions } from './animationHelpers';
 
-import { isLowEnd } from './perfTier';
-import { modelWorldPos, modelSitAmountRef } from './modelState';
+import { modelWorldPos, modelSitAmountRef, modelForwardRef } from './modelState';
 
 // Pre-allocated — never created per frame
 const _raycaster = new THREE.Raycaster();
@@ -655,6 +654,8 @@ const ModelController = () => {
       modelWorldPos.copy(worldPosRef.current);
       const s = sitStateRef.current;
       modelSitAmountRef.value = (s === 'sit_loop' || s === 'sit_loop2' || s === 'sit_start' || s === 'scratch') ? 1 : 0;
+      const ry = modelRef.current.rotation.y;
+      modelForwardRef.value.set(Math.sin(ry), Math.cos(ry));
 
       if (currentSpeedRef.current > MIN_SPEED_FOR_WALK) {
         const currentRotation = modelRef.current.rotation.y;
@@ -678,7 +679,7 @@ const ModelController = () => {
       <directionalLight
         ref={shadowLightRef}
         intensity={1.5}
-        castShadow={!isLowEnd}
+        castShadow={false} /* disabled — nothing visible receives this shadow; re-enable when needed */
         shadow-mapSize={[2048, 2048]}
         shadow-camera-near={1}
         shadow-camera-far={120}

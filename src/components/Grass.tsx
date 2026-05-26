@@ -2,7 +2,7 @@ import { useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { useFrame } from '@react-three/fiber';
 import { isLowEnd } from './perfTier';
-import { modelWorldPos, modelSitAmountRef } from './modelState';
+import { modelWorldPos, modelSitAmountRef, modelForwardRef } from './modelState';
 
 const PLAYER_RADIUS = 0.35;
 
@@ -196,6 +196,7 @@ const vertexShader = /* glsl */`
   uniform vec3  uPlayerPos;
   uniform float uPlayerRadius;
   uniform float uSitAmount;
+  uniform vec2  uPlayerForward;
 
   varying vec2  vUv;
   varying vec2  vWorldXZ;
@@ -217,16 +218,28 @@ const vertexShader = /* glsl */`
   void main() {
     vec4 modelPos = modelMatrix * instanceMatrix * vec4(position, 1.0);
     vWorldXZ = modelPos.xz;
+    float originalY = modelPos.y; // pre-wind blade height — used for sit rotation
 
     // Pre-calculate player distance — needed for both wind suppression and push
     vec2  diff = modelPos.xz - uPlayerPos.xz;
     float dist = length(diff);
 
     // Wind: rolling sin wave + procedural turbulence (no texture seams)
-    // Suppressed near the model when sitting so pressed-down grass stays still.
+    // When sitting, suppress wind in an orientation-aware ellipse that extends
+    // further behind the model to cover the tail.
     vec2  windDir    = normalize(vec2(1.0, 0.5));
     float turbulence = fbm(modelPos.xz * 0.05 - uTime * 0.12 * windDir);
-    float windSuppress = 1.0 - smoothstep(uPlayerRadius * 2.0, 0.0, dist) * uSitAmount;
+
+    float wsAlong  = dot(diff, uPlayerForward);
+    float wsAcross = dot(diff, vec2(-uPlayerForward.y, uPlayerForward.x));
+    float wsLen    = wsAlong < 0.0
+                       ? mix(uPlayerRadius * 2.0, 1.2, uSitAmount)   // behind — covers tail
+                       : mix(uPlayerRadius * 2.0, 0.7, uSitAmount);  // in front — covers paws
+    float wsSide   = mix(uPlayerRadius * 2.0, 0.8, uSitAmount);
+    float wsEll    = sqrt(pow(wsAcross / wsSide, 2.0) + pow(wsAlong / wsLen, 2.0));
+    // Flat suppression across most of the ellipse interior, quick fade only at the edge
+    float windSuppress = mix(1.0, smoothstep(0.8, 1.0, wsEll), uSitAmount);
+
     float sway       = sin(0.35 * dot(windDir, modelPos.xz) + turbulence * 5.0 + uTime)
                        * uWindAmp * uv.y * windSuppress;
 
@@ -235,16 +248,21 @@ const vertexShader = /* glsl */`
     // Subtle vertical lift from turbulence — tips nod up and down
     modelPos.y += (turbulence - 0.5) * 0.08 * uv.y * windSuppress;
 
-    // Player interaction — lean when walking, flatten when sitting
-    float walkRadius  = uPlayerRadius;
-    float sitRadius   = uPlayerRadius * 2.0;
-    float effectiveR  = mix(walkRadius, sitRadius, uSitAmount);
-    float lateralPush = mix(0.18, 0.28, uSitAmount);
-    float push        = smoothstep(effectiveR, 0.0, dist) * lateralPush;
-    modelPos.xz      += normalize(diff + vec2(0.001)) * push * uv.y;
-    // Press tips downward when sitting — 0.4 is enough to fully flatten the tallest blade
-    float flatAmount  = smoothstep(sitRadius * 0.8, 0.0, dist) * uSitAmount * 0.4;
-    modelPos.y       -= flatAmount * uv.y;
+    // ── Walking push: gentle circular lean ──────────────────────────────────
+    float walkFactor = smoothstep(uPlayerRadius, 0.0, dist) * (1.0 - uSitAmount);
+    modelPos.xz     += normalize(diff + vec2(0.001)) * walkFactor * 0.26 * uv.y;
+
+    // ── Sitting push: length-preserving rotation — no stretching ───────────────
+    // Each vertex moves outward by its own pre-wind height and loses that same
+    // height, so the blade rotates from upright to flat without changing length.
+    float sitAlong  = dot(diff, uPlayerForward);
+    float sitAcross = dot(diff, vec2(-uPlayerForward.y, uPlayerForward.x));
+    float sitLen    = sitAlong < 0.0 ? 1.1 : 0.65;
+    float sitSide   = 0.7;
+    float sitEll    = sqrt(pow(sitAcross / sitSide, 2.0) + pow(sitAlong / sitLen, 2.0));
+    float sitFactor = smoothstep(1.0, 0.0, sitEll) * uSitAmount;
+    modelPos.xz    += normalize(diff + vec2(0.001)) * sitFactor * originalY;
+    modelPos.y     -= sitFactor * originalY;
 
     vUv         = uv;
     gl_Position = projectionMatrix * viewMatrix * modelPos;
@@ -260,6 +278,9 @@ const fragmentShader = /* glsl */`
   uniform vec3      fogColor;
   uniform float     fogNear;
   uniform float     fogFar;
+  uniform vec3      uPlayerPos;
+  uniform float     uSitAmount;
+  uniform vec2      uShadowDir;  // normalized XZ direction light→model (shadow falls this way)
 
   varying vec2  vUv;
   varying vec2  vWorldXZ;
@@ -269,11 +290,26 @@ const fragmentShader = /* glsl */`
     if (alpha < 0.08) discard;
 
     // Colour variation sampled at low frequency (~200-unit patches).
-    // UV stays in [0,1] over the fog-visible range so ClampToEdge never shows.
     vec2 colorUV = vWorldXZ / 400.0 + 0.5;
     vec3 tipColor = mix(uTipColor1, uTipColor2,
                         texture2D(uNoiseTexture, colorUV).r);
     vec3 col = mix(uBaseColor, tipColor, vUv.y);
+
+    // Fake directional shadow — asymmetric ellipse aligned with sun angle.
+    // Long axis stretches in the shadow direction, short on the sun-facing side.
+    vec2  shadowPerp = vec2(-uShadowDir.y, uShadowDir.x);
+    vec2  offset     = vWorldXZ - uPlayerPos.xz;
+    float along      = dot(offset, uShadowDir);
+    float perp       = dot(offset, shadowPerp);
+
+    // Asymmetric half-lengths: long shadow tail, short sun-side stub
+    float halfLen    = along >= 0.0 ? mix(1.5, 2.2, uSitAmount)  // shadow side
+                                    : mix(0.45, 0.65, uSitAmount); // sun side
+    float halfWid    = mix(0.5, 0.75, uSitAmount);
+
+    float ellDist    = sqrt(pow(perp / halfWid, 2.0) + pow(along / halfLen, 2.0));
+    float shadow     = (1.0 - smoothstep(0.5, 1.0, ellDist)) * 0.36;
+    col             *= 1.0 - shadow;
 
     float depth     = gl_FragCoord.z / gl_FragCoord.w;
     float fogFactor = clamp((fogFar - depth) / (fogFar - fogNear), 0.0, 1.0);
@@ -284,6 +320,13 @@ const fragmentShader = /* glsl */`
 `;
 
 // ─── Component ────────────────────────────────────────────────────────────────
+
+// Shadow light is fixed at world (0, 35, -60) — its XZ is (0, -60).
+// Shadow direction = normalize(modelXZ - lightXZ), updated only when model moves.
+const _lightXZ    = new THREE.Vector2(0, -60);
+const _shadowDir  = new THREE.Vector2();
+const _prevModelXZ = new THREE.Vector2(9999, 9999);
+const MOVE_EPS = 0.0001;
 
 const Grass = () => {
   const timeRef = useRef(0);
@@ -308,6 +351,8 @@ const Grass = () => {
         uPlayerPos:    { value: new THREE.Vector3(9999, 0, 9999) },
         uPlayerRadius: { value: PLAYER_RADIUS },
         uSitAmount:    { value: 0 },
+        uShadowDir:    { value: new THREE.Vector2(0, 1) },
+        uPlayerForward: { value: new THREE.Vector2(0, 1) },
         fogColor:      { value: new THREE.Color('#c8d8b0') },
         fogNear:       { value: 80 },
         fogFar:        { value: 360 },
@@ -326,9 +371,24 @@ const Grass = () => {
     timeRef.current += delta;
     const mat = material as THREE.ShaderMaterial;
     mat.uniforms.uTime.value = timeRef.current;
-    mat.uniforms.uPlayerPos.value.copy(modelWorldPos);
-    // Smooth transition into/out of sitting press
-    sitAmountRef.current += (modelSitAmountRef.value - sitAmountRef.current) * Math.min(1, delta * 4);
+    // Only update position-dependent uniforms when the model has actually moved
+    const movedX = Math.abs(modelWorldPos.x - _prevModelXZ.x);
+    const movedZ = Math.abs(modelWorldPos.z - _prevModelXZ.y);
+    if (movedX > MOVE_EPS || movedZ > MOVE_EPS) {
+      _prevModelXZ.set(modelWorldPos.x, modelWorldPos.z);
+      mat.uniforms.uPlayerPos.value.copy(modelWorldPos);
+      _shadowDir.set(modelWorldPos.x - _lightXZ.x, modelWorldPos.z - _lightXZ.y).normalize();
+      mat.uniforms.uShadowDir.value.copy(_shadowDir);
+    }
+    mat.uniforms.uPlayerForward.value.copy(modelForwardRef.value);
+    // Smooth transition into/out of sitting — snap when close to avoid infinite ticking
+    const sitTarget = modelSitAmountRef.value;
+    const sitDiff = sitTarget - sitAmountRef.current;
+    if (Math.abs(sitDiff) < 0.001) {
+      sitAmountRef.current = sitTarget;
+    } else {
+      sitAmountRef.current += sitDiff * Math.min(1, delta * 4);
+    }
     mat.uniforms.uSitAmount.value = sitAmountRef.current;
   });
 
