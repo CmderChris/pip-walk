@@ -2,7 +2,7 @@ import { useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { useFrame } from '@react-three/fiber';
 import { isLowEnd } from './perfTier';
-import { modelWorldPos, modelSitAmountRef, modelForwardRef } from './modelState';
+import { modelWorldPos, modelSitAmountRef, modelForwardRef, modelPawPositions } from './modelState';
 
 const PLAYER_RADIUS = 0.35;
 
@@ -12,13 +12,13 @@ const PLAYER_RADIUS = 0.35;
 // Near rings are intentionally much denser than far rings so the foreground
 // looks lush while the horizon thins out naturally without a hard boundary.
 const RINGS = [
-  { r:  50, planes: 4, clusters: isLowEnd ? 3_800 : 13_000, perC: 14, cR: 0.5 },
-  { r:  90, planes: 4, clusters: isLowEnd ? 2_800 : 9_000,  perC: 12, cR: 0.7 },
-  { r: 140, planes: 3, clusters: isLowEnd ? 1_100 : 3_400,  perC:  6, cR: 1.0 },
-  { r: 200, planes: 3, clusters: isLowEnd ?   650 : 2_000,  perC:  5, cR: 1.4 },
-  { r: 300, planes: 2, clusters: isLowEnd ?   500 : 1_500,  perC:  4, cR: 4.0 },
-  { r: 450, planes: 2, clusters: isLowEnd ?   350 :   900,  perC:  3, cR: 7.0 },
-  { r: 700, planes: 2, clusters: isLowEnd ?   200 :   550,  perC:  3, cR: 12.0 },
+  { r:  50, planes: 3, clusters: isLowEnd ?  4_500 : 16_000, perC: 14, cR: 0.5,  w: 0.52, hs: 1.0 },
+  { r:  90, planes: 3, clusters: isLowEnd ?  2_800 :  9_000, perC: 12, cR: 0.7,  w: 0.52, hs: 1.0 },
+  { r: 140, planes: 3, clusters: isLowEnd ?  3_000 : 10_000, perC:  8, cR: 1.0,  w: 0.52, hs: 1.0 },
+  { r: 200, planes: 2, clusters: isLowEnd ?  6_000 : 22_000, perC:  6, cR: 1.4,  w: 0.6,  hs: 1.0 },
+  { r: 300, planes: 2, clusters: isLowEnd ?  6_000 : 20_000, perC:  4, cR: 3.0,  w: 0.8,  hs: 1.2 },
+  { r: 450, planes: 2, clusters: isLowEnd ?  5_000 : 16_000, perC:  3, cR: 6.0,  w: 1.2,  hs: 1.8 },
+  { r: 700, planes: 2, clusters: isLowEnd ?  3_000 : 10_000, perC:  3, cR: 12.0, w: 2.0,  hs: 2.5 },
 ];
 
 // ─── Grass blade alpha texture ────────────────────────────────────────────────
@@ -45,7 +45,7 @@ function makeGrassAlphaTexture(size = 512): THREE.CanvasTexture {
     const leanPx = lean * size;
     const tip    = bx + leanPx;          // x at the very top
     const midX   = bx + leanPx * 0.45;  // x at the widest point
-    const midY   = size * 0.55;          // y of widest point (55% down from top — longer taper to tip)
+    const midY   = size * 0.68;          // y of widest point — longer upper taper for a pointier tip
 
     ctx.beginPath();
     ctx.moveTo(bx, size);  // bottom — a thin point
@@ -107,7 +107,7 @@ function makeNoiseTexture(size = 256): THREE.DataTexture {
 }
 
 // ─── Tuft geometry ────────────────────────────────────────────────────────────
-function createTuftGeometry(numPlanes: number, width = 0.7, height = 1.0): THREE.BufferGeometry {
+function createTuftGeometry(numPlanes: number, width = 0.52, height = 1.0): THREE.BufferGeometry {
   const positions: number[] = [], uvs: number[] = [], indices: number[] = [];
   for (let p = 0; p < numPlanes; p++) {
     const angle = (p / numPlanes) * Math.PI;
@@ -137,6 +137,7 @@ function fillRing(
   innerR: number,
   perCluster: number,
   clusterRadius: number,
+  heightScale = 1.0,
 ) {
   const numClusters = Math.ceil(totalCount / perCluster);
   const annulusArea = Math.PI * (outerR * outerR - innerR * innerR);
@@ -173,7 +174,7 @@ function fillRing(
     for (let t = 0; t < perCluster && idx < totalCount; t++) {
       const angle = Math.random() * Math.PI * 2;
       const dist  = Math.sqrt(Math.random()) * clusterRadius;
-      const sy    = 0.18 + Math.random() * 0.16;
+      const sy    = (0.13 + Math.random() * 0.10) * heightScale;
       const scale = 0.7  + Math.random() * 0.4;
       _dummy.position.set(cx + Math.cos(angle) * dist, 0, cz + Math.sin(angle) * dist);
       _dummy.rotation.set(0, Math.random() * Math.PI * 2, 0);
@@ -197,6 +198,9 @@ const vertexShader = /* glsl */`
   uniform float uPlayerRadius;
   uniform float uSitAmount;
   uniform vec2  uPlayerForward;
+#ifdef PAW_TRACKING
+  uniform vec3  uPawPositions[2];
+#endif
 
   varying vec2  vUv;
   varying vec2  vWorldXZ;
@@ -224,33 +228,54 @@ const vertexShader = /* glsl */`
     vec2  diff = modelPos.xz - uPlayerPos.xz;
     float dist = length(diff);
 
-    // Wind: rolling sin wave + procedural turbulence (no texture seams)
-    // When sitting, suppress wind in an orientation-aware ellipse that extends
-    // further behind the model to cover the tail.
-    vec2  windDir    = normalize(vec2(1.0, 0.5));
-    float turbulence = fbm(modelPos.xz * 0.05 - uTime * 0.12 * windDir);
-
+    // Wind suppression ellipse — always computed (needed for sit/paw zones even without animation)
+    vec2  windDir  = normalize(vec2(1.0, 0.5));
     float wsAlong  = dot(diff, uPlayerForward);
     float wsAcross = dot(diff, vec2(-uPlayerForward.y, uPlayerForward.x));
     float wsLen    = wsAlong < 0.0
-                       ? mix(uPlayerRadius * 2.0, 1.2, uSitAmount)   // behind — covers tail
-                       : mix(uPlayerRadius * 2.0, 0.7, uSitAmount);  // in front — covers paws
-    float wsSide   = mix(uPlayerRadius * 2.0, 0.8, uSitAmount);
+                       ? mix(uPlayerRadius * 2.0, 1.2, uSitAmount)
+                       : mix(uPlayerRadius * 2.0, 0.7, uSitAmount);
+    float wsSide   = mix(uPlayerRadius * 2.0, 0.6, uSitAmount);
     float wsEll    = sqrt(pow(wsAcross / wsSide, 2.0) + pow(wsAlong / wsLen, 2.0));
-    // Flat suppression across most of the ellipse interior, quick fade only at the edge
     float windSuppress = mix(1.0, smoothstep(0.8, 1.0, wsEll), uSitAmount);
 
+#ifdef PAW_TRACKING
+    // Per-paw suppression — keeps grass near each front leg still (skip when sitting)
+    if (uSitAmount < 0.99) {
+      for (int i = 0; i < 2; i++) {
+        vec2  pd    = modelPos.xz - uPawPositions[i].xz;
+        float pDist = length(pd);
+        windSuppress = min(windSuppress, smoothstep(0.0, 0.28, pDist));
+      }
+    }
+#endif
+
+#ifdef ANIMATED
+    // Wind: rolling sin wave + procedural turbulence
+    float turbulence = fbm(modelPos.xz * 0.05 - uTime * 0.12 * windDir);
     float sway       = sin(0.35 * dot(windDir, modelPos.xz) + turbulence * 5.0 + uTime)
                        * uWindAmp * uv.y * windSuppress;
-
     modelPos.x += sway * windDir.x;
     modelPos.z += sway * windDir.y;
-    // Subtle vertical lift from turbulence — tips nod up and down
     modelPos.y += (turbulence - 0.5) * 0.08 * uv.y * windSuppress;
+#endif
 
     // ── Walking push: gentle circular lean ──────────────────────────────────
     float walkFactor = smoothstep(uPlayerRadius, 0.0, dist) * (1.0 - uSitAmount);
     modelPos.xz     += normalize(diff + vec2(0.001)) * walkFactor * 0.26 * uv.y;
+
+#ifdef PAW_TRACKING
+    // ── Per-paw push: small push at each front foot contact point (skip when sitting) ─
+    if (uSitAmount < 0.99) {
+      float pawStrength = 0.14 * (1.0 - uSitAmount);
+      for (int i = 0; i < 2; i++) {
+        vec2  pd    = modelPos.xz - uPawPositions[i].xz;
+        float pDist = length(pd);
+        float pPush = smoothstep(0.2, 0.0, pDist) * pawStrength;
+        modelPos.xz += normalize(pd + vec2(0.001)) * pPush * uv.y;
+      }
+    }
+#endif
 
     // ── Sitting push: length-preserving rotation — no stretching ───────────────
     // Each vertex moves outward by its own pre-wind height and loses that same
@@ -258,11 +283,11 @@ const vertexShader = /* glsl */`
     float sitAlong  = dot(diff, uPlayerForward);
     float sitAcross = dot(diff, vec2(-uPlayerForward.y, uPlayerForward.x));
     float sitLen    = sitAlong < 0.0 ? 1.1 : 0.65;
-    float sitSide   = 0.7;
+    float sitSide   = 0.55;
     float sitEll    = sqrt(pow(sitAcross / sitSide, 2.0) + pow(sitAlong / sitLen, 2.0));
     float sitFactor = smoothstep(1.0, 0.0, sitEll) * uSitAmount;
     modelPos.xz    += normalize(diff + vec2(0.001)) * sitFactor * originalY;
-    modelPos.y     -= sitFactor * originalY;
+    modelPos.y      = mix(modelPos.y, 0.0, sitFactor);
 
     vUv         = uv;
     gl_Position = projectionMatrix * viewMatrix * modelPos;
@@ -294,6 +319,16 @@ const fragmentShader = /* glsl */`
     vec3 tipColor = mix(uTipColor1, uTipColor2,
                         texture2D(uNoiseTexture, colorUV).r);
     vec3 col = mix(uBaseColor, tipColor, vUv.y);
+
+    // Subtly darken blade bases so they recede into the ground
+    col *= mix(0.45, 1.0, smoothstep(0.0, 0.3, vUv.y));
+
+    // Backlit translucency — blades glow when sun is behind them relative to the viewer
+    // cameraPosition is a Three.js built-in uniform, always available
+    vec3  toCamera = normalize(cameraPosition - vec3(vWorldXZ.x, 0.5, vWorldXZ.y));
+    vec3  sunDir   = normalize(vec3(0.0, 35.0, -60.0)); // matches scene directional light
+    float backlit  = pow(max(0.0, dot(toCamera, -sunDir)), 2.0);
+    col += mix(vec3(0.3, 0.7, 0.1), vec3(0.6, 1.0, 0.3), vUv.y) * (backlit * 0.4 * vUv.y);
 
     // Fake directional shadow — asymmetric ellipse aligned with sun angle.
     // Long axis stretches in the shadow direction, short on the sun-facing side.
@@ -331,56 +366,81 @@ const MOVE_EPS = 0.0001;
 const Grass = () => {
   const timeRef = useRef(0);
 
-  const { geometries, material } = useMemo(() => {
+  const { geometries, nearMaterial, farMaterial } = useMemo(() => {
     const alphaTexture = makeGrassAlphaTexture(512);
     const noiseTexture = makeNoiseTexture(256);
-    const geometries   = RINGS.map(r => createTuftGeometry(r.planes));
+    const geometries   = RINGS.map(r => createTuftGeometry(r.planes, r.w));
 
-    const material = new THREE.ShaderMaterial({
+    // Shared uniform objects — both materials reference the same value objects,
+    // so updating via nearMaterial automatically updates farMaterial too.
+    const sharedUniforms = {
+      uTime:          { value: 0 },
+      uWindAmp:       { value: 0.08 },
+      uGrassAlpha:    { value: alphaTexture },
+      uNoiseTexture:  { value: noiseTexture },
+      // original ground-match green: #2e4414
+      uBaseColor:     { value: new THREE.Color('#2d3d0e') },
+      uTipColor1:     { value: new THREE.Color('#8ec97a') },
+      uTipColor2:     { value: new THREE.Color('#4a7a32') },
+      uPlayerPos:     { value: new THREE.Vector3(9999, 0, 9999) },
+      uPlayerRadius:  { value: PLAYER_RADIUS },
+      uSitAmount:     { value: 0 },
+      uShadowDir:     { value: new THREE.Vector2(0, 1) },
+      uPlayerForward: { value: new THREE.Vector2(0, 1) },
+      fogColor:       { value: new THREE.Color('#c8d8b0') },
+      fogNear:        { value: 80 },
+      fogFar:         { value: 360 },
+    };
+
+    const matBase = {
       vertexShader,
       fragmentShader,
-      uniforms: {
-        uTime:         { value: 0 },
-        uWindAmp:      { value: 0.08 },
-        uGrassAlpha:   { value: alphaTexture },
-        uNoiseTexture: { value: noiseTexture },
-        // original ground-match green: #2e4414
-        uBaseColor:    { value: new THREE.Color('#28240f') },
-        uTipColor1:    { value: new THREE.Color('#8ec97a') },
-        uTipColor2:    { value: new THREE.Color('#4a7a32') },
-        uPlayerPos:    { value: new THREE.Vector3(9999, 0, 9999) },
-        uPlayerRadius: { value: PLAYER_RADIUS },
-        uSitAmount:    { value: 0 },
-        uShadowDir:    { value: new THREE.Vector2(0, 1) },
-        uPlayerForward: { value: new THREE.Vector2(0, 1) },
-        fogColor:      { value: new THREE.Color('#c8d8b0') },
-        fogNear:       { value: 80 },
-        fogFar:        { value: 360 },
-      },
-      side: THREE.DoubleSide,
+      side: THREE.DoubleSide as THREE.Side,
       transparent: false,
       depthWrite:  true,
+    };
+
+    // Near rings (0–1): full paw tracking + animation via PAW_TRACKING/ANIMATED defines
+    const nearMaterial = new THREE.ShaderMaterial({
+      ...matBase,
+      uniforms: {
+        ...sharedUniforms,
+        uPawPositions: { value: [
+          new THREE.Vector3(9999, 0, 9999),
+          new THREE.Vector3(9999, 0, 9999),
+        ]},
+      },
+      defines: { PAW_TRACKING: '', ANIMATED: '' },
     });
 
-    return { geometries, material };
+    // Far rings (2–6): no paw tracking or animation — saves shader cost
+    const farMaterial = new THREE.ShaderMaterial({
+      ...matBase,
+      uniforms: { ...sharedUniforms },
+    });
+
+    return { geometries, nearMaterial, farMaterial };
   }, []);
 
   const sitAmountRef = useRef(0);
 
   useFrame((_, delta) => {
     timeRef.current += delta;
-    const mat = material as THREE.ShaderMaterial;
-    mat.uniforms.uTime.value = timeRef.current;
+    // nearMaterial and farMaterial share the same underlying uniform objects,
+    // so updating via nearMaterial updates farMaterial automatically.
+    nearMaterial.uniforms.uTime.value = timeRef.current;
     // Only update position-dependent uniforms when the model has actually moved
     const movedX = Math.abs(modelWorldPos.x - _prevModelXZ.x);
     const movedZ = Math.abs(modelWorldPos.z - _prevModelXZ.y);
     if (movedX > MOVE_EPS || movedZ > MOVE_EPS) {
       _prevModelXZ.set(modelWorldPos.x, modelWorldPos.z);
-      mat.uniforms.uPlayerPos.value.copy(modelWorldPos);
+      nearMaterial.uniforms.uPlayerPos.value.copy(modelWorldPos);
       _shadowDir.set(modelWorldPos.x - _lightXZ.x, modelWorldPos.z - _lightXZ.y).normalize();
-      mat.uniforms.uShadowDir.value.copy(_shadowDir);
+      nearMaterial.uniforms.uShadowDir.value.copy(_shadowDir);
     }
-    mat.uniforms.uPlayerForward.value.copy(modelForwardRef.value);
+    nearMaterial.uniforms.uPlayerForward.value.copy(modelForwardRef.value);
+    const pawUniforms = nearMaterial.uniforms.uPawPositions.value as THREE.Vector3[];
+    for (let i = 0; i < 2; i++) pawUniforms[i].copy(modelPawPositions[i]);
     // Smooth transition into/out of sitting — snap when close to avoid infinite ticking
     const sitTarget = modelSitAmountRef.value;
     const sitDiff = sitTarget - sitAmountRef.current;
@@ -389,7 +449,7 @@ const Grass = () => {
     } else {
       sitAmountRef.current += sitDiff * Math.min(1, delta * 4);
     }
-    mat.uniforms.uSitAmount.value = sitAmountRef.current;
+    nearMaterial.uniforms.uSitAmount.value = sitAmountRef.current;
   });
 
   return (
@@ -397,14 +457,15 @@ const Grass = () => {
       {RINGS.map((ring, i) => {
         const prevR = i === 0 ? 0 : RINGS[i - 1].r;
         const total = ring.clusters * ring.perC;
+        const mat   = i <= 1 ? nearMaterial : farMaterial;
         return (
           <instancedMesh
             key={i}
             ref={(node) => {
               if (!node) return;
-              fillRing(node, total, ring.r, prevR, ring.perC, ring.cR);
+              fillRing(node, total, ring.r, prevR, ring.perC, ring.cR, ring.hs);
             }}
-            args={[geometries[i], material, total]}
+            args={[geometries[i], mat, total]}
             frustumCulled={false}
           />
         );

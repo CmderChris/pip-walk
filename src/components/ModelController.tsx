@@ -16,7 +16,7 @@ import {
 } from './modelConfig';
 import { setWeights, type AnimationActions } from './animationHelpers';
 
-import { modelWorldPos, modelSitAmountRef, modelForwardRef } from './modelState';
+import { modelWorldPos, modelSitAmountRef, modelForwardRef, modelPawPositions } from './modelState';
 
 // Pre-allocated — never created per frame
 const _raycaster = new THREE.Raycaster();
@@ -68,6 +68,9 @@ const ModelController = () => {
   const moveSpeedRef = useRef(0);
   const landingSpeedRef = useRef(1);
 
+  // ── Paw bone refs (front-left, front-right only — back paws handled by body sit zone) ──
+  const pawBonesRef = useRef<(THREE.Bone | null)[]>([null, null]);
+
   // ── Input refs ─────────────────────────────────────────────────────────────
   const keysPressedRef = useRef({ w: false, a: false, s: false, d: false });
   const joystickRef = useRef({ x: 0, y: 0 });
@@ -90,6 +93,14 @@ const ModelController = () => {
   // ── Texture setup ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (!scene) return;
+    // Find the front two foot bones for grass paw interaction (back paws covered by body zone)
+    const pawNames = ['foot_fL_028', 'foot_fR_034'];
+    scene.traverse((obj) => {
+      if (obj instanceof THREE.Bone) {
+        const idx = pawNames.indexOf(obj.name);
+        if (idx !== -1) pawBonesRef.current[idx] = obj;
+      }
+    });
     albedo.colorSpace = THREE.SRGBColorSpace;
     scene.traverse((obj) => {
       if (!(obj instanceof THREE.Mesh)) return;
@@ -615,6 +626,11 @@ const ModelController = () => {
     }
 
     mixerRef.current?.update(delta);
+    // Update front paw world positions for grass interaction
+    for (let i = 0; i < 2; i++) {
+      const bone = pawBonesRef.current[i];
+      if (bone) bone.getWorldPosition(modelPawPositions[i]);
+    }
 
     // 9. Cancel root motion XZ; apply sine arc lift during airborne phases
     const activeState = sitStateRef.current;
