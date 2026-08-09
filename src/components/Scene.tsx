@@ -2,15 +2,12 @@ import { Suspense } from 'react';
 import * as THREE from 'three';
 import { Canvas } from '@react-three/fiber';
 import { Sky, Environment } from '@react-three/drei';
-import { Physics } from '@react-three/cannon';
 import { EffectComposer, Bloom, Vignette, N8AO } from '@react-three/postprocessing';
 import { isLowEnd } from './perfTier';
 
 import CameraController from './CameraController';
-import Floor from './Floor';
 import Ground from './Ground';
 // import Grass from './Grass';
-import Boundaries from './Boundaries';
 import ModelController from './ModelController';
 import { FpsTracker, FpsDisplay } from './FpsCounter';
 
@@ -35,11 +32,6 @@ const Scene = () => {
 
         <ambientLight intensity={isLowEnd ? 0.6 : 0.25} />
 
-        <Physics>
-          <Floor />
-          <Boundaries />
-        </Physics>
-
         {!isLowEnd && (
           <EffectComposer multisampling={0}>
             <N8AO aoRadius={2} intensity={2} />
@@ -53,6 +45,7 @@ const Scene = () => {
           {/* <Grass /> */}
           <ModelController />
           {import.meta.env.DEV && <FpsTracker />}
+          <Environment files="/env/park.hdr" />
         </Suspense>
 
         <Sky
@@ -61,7 +54,6 @@ const Scene = () => {
           inclination={0.5}
           azimuth={0.25}
         />
-        <Environment preset="park" />
       </Canvas>
       {import.meta.env.DEV && <FpsDisplay />}
     </div>

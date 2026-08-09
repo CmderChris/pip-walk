@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { useFrame } from '@react-three/fiber';
 import { isLowEnd } from './perfTier';
 import { modelWorldPos, modelSitAmountRef, modelForwardRef, modelPawPositions } from './modelState';
+import { SUN_POSITION } from './modelConfig';
 
 const PLAYER_RADIUS = 0.35;
 
@@ -306,6 +307,7 @@ const fragmentShader = /* glsl */`
   uniform vec3      uPlayerPos;
   uniform float     uSitAmount;
   uniform vec2      uShadowDir;  // normalized XZ direction light→model (shadow falls this way)
+  uniform vec3      uSunPosition;
 
   varying vec2  vUv;
   varying vec2  vWorldXZ;
@@ -326,7 +328,7 @@ const fragmentShader = /* glsl */`
     // Backlit translucency — blades glow when sun is behind them relative to the viewer
     // cameraPosition is a Three.js built-in uniform, always available
     vec3  toCamera = normalize(cameraPosition - vec3(vWorldXZ.x, 0.5, vWorldXZ.y));
-    vec3  sunDir   = normalize(vec3(0.0, 35.0, -60.0)); // matches scene directional light
+    vec3  sunDir   = normalize(uSunPosition); // matches scene directional light
     float backlit  = pow(max(0.0, dot(toCamera, -sunDir)), 2.0);
     col += mix(vec3(0.3, 0.7, 0.1), vec3(0.6, 1.0, 0.3), vUv.y) * (backlit * 0.4 * vUv.y);
 
@@ -356,9 +358,8 @@ const fragmentShader = /* glsl */`
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-// Shadow light is fixed at world (0, 35, -60) — its XZ is (0, -60).
 // Shadow direction = normalize(modelXZ - lightXZ), updated only when model moves.
-const _lightXZ    = new THREE.Vector2(0, -60);
+const _lightXZ    = new THREE.Vector2(SUN_POSITION.x, SUN_POSITION.z);
 const _shadowDir  = new THREE.Vector2();
 const _prevModelXZ = new THREE.Vector2(9999, 9999);
 const MOVE_EPS = 0.0001;
@@ -387,6 +388,7 @@ const Grass = () => {
       uSitAmount:     { value: 0 },
       uShadowDir:     { value: new THREE.Vector2(0, 1) },
       uPlayerForward: { value: new THREE.Vector2(0, 1) },
+      uSunPosition:   { value: SUN_POSITION.clone() },
       fogColor:       { value: new THREE.Color('#c8d8b0') },
       fogNear:        { value: 80 },
       fogFar:         { value: 360 },

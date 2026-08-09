@@ -1,3 +1,5 @@
+import * as THREE from 'three';
+
 // ── Animation clip names ───────────────────────────────────────────────────
 export const MODEL_PATH = '/models/new_dog4.glb';
 export const TEXTURE_BASE = '/models/pomeranian_model/spitz_textures/texture';
@@ -35,6 +37,11 @@ export const ROTATION_SPEED = 10;
 export const MIN_SPEED_FOR_WALK = 0.5;
 export const EDGE_MARGIN = 0.02;       // NDC margin inside each screen edge
 export const PLAY_AREA_FAR_Z = -25;    // world Z of the back boundary
+
+// ── Lighting ───────────────────────────────────────────────────────────────
+// Fixed "sun" position — shared by ModelController's shadow-casting light and
+// Grass's shadow/backlight shaders so they can never drift out of sync.
+export const SUN_POSITION = new THREE.Vector3(0, 35, -60);
 
 // ── Types ──────────────────────────────────────────────────────────────────
 export type SitState =

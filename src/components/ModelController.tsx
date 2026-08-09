@@ -12,6 +12,7 @@ import {
   SIT_LOOP2_INTERVAL_MIN, SIT_LOOP2_INTERVAL_MAX,
   MOVE_SPEED, MODEL_Y_OFFSET, ROTATION_SPEED, MIN_SPEED_FOR_WALK,
   EDGE_MARGIN, PLAY_AREA_FAR_Z,
+  SUN_POSITION,
   type SitState,
 } from './modelConfig';
 import { setWeights, type AnimationActions } from './animationHelpers';
@@ -348,9 +349,8 @@ const ModelController = () => {
         ((clientX - rect.left) / rect.width) * 2 - 1,
         -((clientY - rect.top) / rect.height) * 2 + 1
       );
-      const ray = new THREE.Raycaster();
-      ray.setFromCamera(ndc, camera);
-      const hits = ray.intersectObject(modelRef.current, true);
+      _raycaster.setFromCamera(ndc, camera);
+      const hits = _raycaster.intersectObject(modelRef.current, true);
       if (hits.length > 0 && pettableStates.includes(sitStateRef.current)) {
         petTriggeredRef.current = true;
       }
@@ -658,7 +658,7 @@ const ModelController = () => {
 
     // 10. Fixed sun position — shadow angle/length changes as model moves
     if (shadowLightRef.current) {
-      shadowLightRef.current.position.set(0, 35, -60);
+      shadowLightRef.current.position.copy(SUN_POSITION);
       shadowLightRef.current.target.position.copy(worldPosRef.current);
       shadowLightRef.current.target.updateMatrixWorld();
       shadowLightRef.current.shadow.needsUpdate = sitStateRef.current !== 'sit_loop';
@@ -695,7 +695,7 @@ const ModelController = () => {
       <directionalLight
         ref={shadowLightRef}
         intensity={1.5}
-        castShadow={false} /* disabled — nothing visible receives this shadow; re-enable when needed */
+        castShadow
         shadow-mapSize={[2048, 2048]}
         shadow-camera-near={1}
         shadow-camera-far={120}
