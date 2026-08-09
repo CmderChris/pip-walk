@@ -6,5 +6,4 @@
 const mobileUA = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
 const cores    = navigator.hardwareConcurrency ?? 8;
 
-export const isMobile = mobileUA;
 export const isLowEnd = mobileUA || cores <= 4;
