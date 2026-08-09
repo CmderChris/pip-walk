@@ -54,6 +54,9 @@ const ModelController = () => {
 
   // ── State refs ─────────────────────────────────────────────────────────────
   const sitStateRef = useRef<SitState>('sit_loop');
+  // The dog starts in 'sit_loop', which normally skips shadow re-rendering —
+  // without this, the very first frame would never render a shadow at all.
+  const shadowInitializedRef = useRef(false);
   const idleTimeRef = useRef(0);
   const animationWeightRef = useRef(0);
   const sitLoop2TimerRef = useRef(
@@ -661,7 +664,11 @@ const ModelController = () => {
       shadowLightRef.current.position.copy(SUN_POSITION);
       shadowLightRef.current.target.position.copy(worldPosRef.current);
       shadowLightRef.current.target.updateMatrixWorld();
-      shadowLightRef.current.shadow.needsUpdate = sitStateRef.current !== 'sit_loop';
+      // Always render at least once (covers mounting straight into sit_loop),
+      // then only re-render on frames where the pose is actually changing.
+      shadowLightRef.current.shadow.needsUpdate =
+        !shadowInitializedRef.current || sitStateRef.current !== 'sit_loop';
+      shadowInitializedRef.current = true;
     }
 
     // 11. Apply world position and rotation to mesh
@@ -696,6 +703,11 @@ const ModelController = () => {
         ref={shadowLightRef}
         intensity={1.5}
         castShadow
+        // autoUpdate off — the per-frame `shadow.needsUpdate` toggle below
+        // (skip while the sit_loop pose is fully settled) only takes effect
+        // when autoUpdate is also false; otherwise the shadow map re-renders
+        // every frame regardless.
+        shadow-autoUpdate={false}
         shadow-mapSize={[2048, 2048]}
         shadow-camera-near={1}
         shadow-camera-far={120}

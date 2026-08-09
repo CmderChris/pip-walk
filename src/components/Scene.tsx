@@ -4,6 +4,7 @@ import { Canvas } from '@react-three/fiber';
 import { Sky, Environment } from '@react-three/drei';
 import { EffectComposer, Bloom, Vignette, N8AO } from '@react-three/postprocessing';
 import { isLowEnd } from './perfTier';
+import { SUN_POSITION } from './modelConfig';
 
 import CameraController from './CameraController';
 import Ground from './Ground';
@@ -50,7 +51,7 @@ const Scene = () => {
 
         <Sky
           distance={450000}
-          sunPosition={[0, 1, 0]}
+          sunPosition={SUN_POSITION.toArray()}
           inclination={0.5}
           azimuth={0.25}
         />
