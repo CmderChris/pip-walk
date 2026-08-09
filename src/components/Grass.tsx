@@ -2,24 +2,33 @@ import { useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { useFrame } from '@react-three/fiber';
 import { isLowEnd } from './perfTier';
-import { modelWorldPos, modelSitAmountRef, modelForwardRef, modelPawPositions } from './modelState';
-import { SUN_POSITION } from './modelConfig';
+import { modelWorldPos, modelSitAmountRef, modelForwardRef, modelPawPositions, modelGroundedRef } from './modelState';
+import { SUN_POSITION, FOG_NEAR, FOG_FAR } from './modelConfig';
 
 const PLAYER_RADIUS = 0.35;
 
-// Seven concentric rings, each roughly 2× sparser than the one inside it.
-// Boundaries are circular (distance-based) so no square corners read as diagonal lines.
-// The outermost ring (r < 700) extends well past fog far=500 so its edge never shows.
-// Near rings are intentionally much denser than far rings so the foreground
-// looks lush while the horizon thins out naturally without a hard boundary.
-const RINGS = [
-  { r:  50, planes: 3, clusters: isLowEnd ?  4_500 : 16_000, perC: 14, cR: 0.5,  w: 0.52, hs: 1.0 },
-  { r:  90, planes: 3, clusters: isLowEnd ?  2_800 :  9_000, perC: 12, cR: 0.7,  w: 0.52, hs: 1.0 },
-  { r: 140, planes: 3, clusters: isLowEnd ?  3_000 : 10_000, perC:  8, cR: 1.0,  w: 0.52, hs: 1.0 },
-  { r: 200, planes: 2, clusters: isLowEnd ?  6_000 : 22_000, perC:  6, cR: 1.4,  w: 0.6,  hs: 1.0 },
-  { r: 300, planes: 2, clusters: isLowEnd ?  6_000 : 20_000, perC:  4, cR: 3.0,  w: 0.8,  hs: 1.2 },
-  { r: 450, planes: 2, clusters: isLowEnd ?  5_000 : 16_000, perC:  3, cR: 6.0,  w: 1.2,  hs: 1.8 },
-  { r: 700, planes: 2, clusters: isLowEnd ?  3_000 : 10_000, perC:  3, cR: 12.0, w: 2.0,  hs: 2.5 },
+// Capped just past the fog's far distance so nothing renders where it can't
+// be seen. Derives from FOG_FAR (not a separate number) so the two can't
+// drift apart the way the old rings (out to r=700) once did.
+const FIELD_RADIUS = FOG_FAR + 20;
+
+// Six distance bands (same density-falloff intent as the original rings),
+// each split into `wedges` angular tiles instead of one full-circle mesh —
+// that's the actual culling fix. three.js auto-computes a bounding sphere per
+// InstancedMesh and culls it individually (frustumCulled stays at its default
+// `true`); a single full-ring mesh always straddles the visible and invisible
+// half of the world, so it could never be culled as a whole.
+//
+// Last band replaces the old r:450 ring; the old r:700 ring (entirely past
+// the fog, never visible) is dropped. Radius derives from FIELD_RADIUS, with
+// `clusters` scaled down to match the smaller area at equal density.
+const BANDS = [
+  { r:  50, planes: 3, clusters: isLowEnd ?  4_500 : 16_000, perC: 14, cR: 0.5,  w: 0.52, hs: 1.0, wedges:  6, near: true  },
+  { r:  90, planes: 3, clusters: isLowEnd ?  2_800 :  9_000, perC: 12, cR: 0.7,  w: 0.52, hs: 1.0, wedges:  8, near: true  },
+  { r: 140, planes: 3, clusters: isLowEnd ?  3_000 : 10_000, perC:  8, cR: 1.0,  w: 0.52, hs: 1.0, wedges:  8, near: false },
+  { r: 200, planes: 2, clusters: isLowEnd ?  6_000 : 22_000, perC:  6, cR: 1.4,  w: 0.6,  hs: 1.0, wedges: 10, near: false },
+  { r: 300, planes: 2, clusters: isLowEnd ?  6_000 : 20_000, perC:  4, cR: 3.0,  w: 0.8,  hs: 1.2, wedges: 12, near: false },
+  { r: FIELD_RADIUS, planes: 2, clusters: isLowEnd ? 2_400 : 7_700, perC: 3, cR: 6.0, w: 1.2, hs: 1.8, wedges: 12, near: false },
 ];
 
 // ─── Grass blade alpha texture ────────────────────────────────────────────────
@@ -128,30 +137,19 @@ function createTuftGeometry(numPlanes: number, width = 0.52, height = 1.0): THRE
   return geo;
 }
 
-// ─── Clustered placement (circular ring bounds) ───────────────────────────────
+// ─── Clustered placement (annulus candidates, split into angular wedges) ──────
 const _dummy = new THREE.Object3D();
 
-function fillRing(
-  node: THREE.InstancedMesh,
-  totalCount: number,
-  outerR: number,
-  innerR: number,
-  perCluster: number,
-  clusterRadius: number,
-  heightScale = 1.0,
-) {
-  const numClusters = Math.ceil(totalCount / perCluster);
-  const annulusArea = Math.PI * (outerR * outerR - innerR * innerR);
-  const outerSq     = outerR * 2;
-  const gridStep    = Math.sqrt(outerSq * outerSq / (numClusters * 3));
-  const cols        = Math.ceil(outerSq / gridStep);
-  const rows        = Math.ceil(outerSq / gridStep);
-  const sx          = outerSq / cols, sz = outerSq / rows;
-  void annulusArea;
+// Grid-samples jittered cluster-center candidates across a full annulus,
+// collected first and shuffled later (via splitIntoWedges) for uniform coverage.
+function generateAnnulusCandidates(outerR: number, innerR: number, targetClusters: number): [number, number][] {
+  const outerSq  = outerR * 2;
+  const gridStep = Math.sqrt(outerSq * outerSq / (targetClusters * 3));
+  const cols     = Math.ceil(outerSq / gridStep);
+  const rows     = Math.ceil(outerSq / gridStep);
+  const sx       = outerSq / cols, sz = outerSq / rows;
 
-  // Collect ALL valid positions first, then randomly sample — ensures uniform
-  // coverage across the full ring, not just one half of it.
-  const candidates: Array<[number, number]> = [];
+  const candidates: [number, number][] = [];
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
       const cx = -outerR + (c + 0.1 + Math.random() * 0.8) * sx;
@@ -163,16 +161,39 @@ function fillRing(
       candidates.push([cx, cz]);
     }
   }
-  // Fisher–Yates shuffle then slice — avoids row-order bias
-  for (let i = candidates.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    const tmp = candidates[i]; candidates[i] = candidates[j]; candidates[j] = tmp;
-  }
-  const centres = candidates.slice(0, numClusters);
+  return candidates;
+}
 
+// Splits candidates into `wedgeCount` angular slices, each Fisher–Yates
+// shuffled so slicing to a per-wedge budget isn't biased by scan order.
+function splitIntoWedges(candidates: [number, number][], wedgeCount: number): [number, number][][] {
+  const wedges: [number, number][][] = Array.from({ length: wedgeCount }, () => []);
+  for (const [cx, cz] of candidates) {
+    const angle = Math.atan2(cz, cx) + Math.PI; // 0..2π
+    const idx   = Math.min(wedgeCount - 1, Math.floor((angle / (Math.PI * 2)) * wedgeCount));
+    wedges[idx].push([cx, cz]);
+  }
+  for (const group of wedges) {
+    for (let i = group.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      const tmp = group[i]; group[i] = group[j]; group[j] = tmp;
+    }
+  }
+  return wedges;
+}
+
+// Scatters `perCluster` jittered blades around each cluster center into an
+// InstancedMesh sized to exactly centres.length * perCluster instances.
+function fillWedge(
+  node: THREE.InstancedMesh,
+  centres: [number, number][],
+  perCluster: number,
+  clusterRadius: number,
+  heightScale: number,
+) {
   let idx = 0;
   for (const [cx, cz] of centres) {
-    for (let t = 0; t < perCluster && idx < totalCount; t++) {
+    for (let t = 0; t < perCluster; t++) {
       const angle = Math.random() * Math.PI * 2;
       const dist  = Math.sqrt(Math.random()) * clusterRadius;
       const sy    = (0.13 + Math.random() * 0.10) * heightScale;
@@ -198,6 +219,7 @@ const vertexShader = /* glsl */`
   uniform vec3  uPlayerPos;
   uniform float uPlayerRadius;
   uniform float uSitAmount;
+  uniform float uGroundedAmount; // 1 = paws on ground, 0 = fully airborne (mid-jump)
   uniform vec2  uPlayerForward;
 #ifdef PAW_TRACKING
   uniform vec3  uPawPositions[2];
@@ -241,12 +263,12 @@ const vertexShader = /* glsl */`
     float windSuppress = mix(1.0, smoothstep(0.8, 1.0, wsEll), uSitAmount);
 
 #ifdef PAW_TRACKING
-    // Per-paw suppression — keeps grass near each front leg still (skip when sitting)
+    // Per-paw suppression — keeps grass near each leg still (skips when sitting/airborne)
     if (uSitAmount < 0.99) {
       for (int i = 0; i < 2; i++) {
         vec2  pd    = modelPos.xz - uPawPositions[i].xz;
         float pDist = length(pd);
-        windSuppress = min(windSuppress, smoothstep(0.0, 0.28, pDist));
+        windSuppress = min(windSuppress, mix(1.0, smoothstep(0.0, 0.28, pDist), uGroundedAmount));
       }
     }
 #endif
@@ -261,14 +283,14 @@ const vertexShader = /* glsl */`
     modelPos.y += (turbulence - 0.5) * 0.08 * uv.y * windSuppress;
 #endif
 
-    // ── Walking push: gentle circular lean ──────────────────────────────────
-    float walkFactor = smoothstep(uPlayerRadius, 0.0, dist) * (1.0 - uSitAmount);
+    // ── Walking push: gentle circular lean (fades out while airborne) ──────
+    float walkFactor = smoothstep(uPlayerRadius, 0.0, dist) * (1.0 - uSitAmount) * uGroundedAmount;
     modelPos.xz     += normalize(diff + vec2(0.001)) * walkFactor * 0.26 * uv.y;
 
 #ifdef PAW_TRACKING
-    // ── Per-paw push: small push at each front foot contact point (skip when sitting) ─
+    // ── Per-paw push: small push at each front foot contact point (skip when sitting or airborne) ─
     if (uSitAmount < 0.99) {
-      float pawStrength = 0.14 * (1.0 - uSitAmount);
+      float pawStrength = 0.14 * (1.0 - uSitAmount) * uGroundedAmount;
       for (int i = 0; i < 2; i++) {
         vec2  pd    = modelPos.xz - uPawPositions[i].xz;
         float pDist = length(pd);
@@ -364,13 +386,22 @@ const _shadowDir  = new THREE.Vector2();
 const _prevModelXZ = new THREE.Vector2(9999, 9999);
 const MOVE_EPS = 0.0001;
 
+type WedgeMesh = {
+  geometry: THREE.BufferGeometry;
+  material: THREE.ShaderMaterial;
+  count: number;
+  centres: [number, number][];
+  perCluster: number;
+  clusterRadius: number;
+  heightScale: number;
+};
+
 const Grass = () => {
   const timeRef = useRef(0);
 
-  const { geometries, nearMaterial, farMaterial } = useMemo(() => {
+  const { wedgeMeshes, nearMaterial } = useMemo(() => {
     const alphaTexture = makeGrassAlphaTexture(512);
     const noiseTexture = makeNoiseTexture(256);
-    const geometries   = RINGS.map(r => createTuftGeometry(r.planes, r.w));
 
     // Shared uniform objects — both materials reference the same value objects,
     // so updating via nearMaterial automatically updates farMaterial too.
@@ -386,12 +417,13 @@ const Grass = () => {
       uPlayerPos:     { value: new THREE.Vector3(9999, 0, 9999) },
       uPlayerRadius:  { value: PLAYER_RADIUS },
       uSitAmount:     { value: 0 },
+      uGroundedAmount:{ value: 1 },
       uShadowDir:     { value: new THREE.Vector2(0, 1) },
       uPlayerForward: { value: new THREE.Vector2(0, 1) },
       uSunPosition:   { value: SUN_POSITION.clone() },
       fogColor:       { value: new THREE.Color('#c8d8b0') },
-      fogNear:        { value: 80 },
-      fogFar:         { value: 360 },
+      fogNear:        { value: FOG_NEAR },
+      fogFar:         { value: FOG_FAR },
     };
 
     const matBase = {
@@ -402,7 +434,7 @@ const Grass = () => {
       depthWrite:  true,
     };
 
-    // Near rings (0–1): full paw tracking + animation via PAW_TRACKING/ANIMATED defines
+    // Near bands (0–1): full paw tracking + animation via PAW_TRACKING/ANIMATED defines
     const nearMaterial = new THREE.ShaderMaterial({
       ...matBase,
       uniforms: {
@@ -415,13 +447,40 @@ const Grass = () => {
       defines: { PAW_TRACKING: '', ANIMATED: '' },
     });
 
-    // Far rings (2–6): no paw tracking or animation — saves shader cost
+    // Far bands: no paw tracking or animation — saves shader cost
     const farMaterial = new THREE.ShaderMaterial({
       ...matBase,
       uniforms: { ...sharedUniforms },
     });
 
-    return { geometries, nearMaterial, farMaterial };
+    // One shared geometry per band, split into per-wedge InstancedMeshes
+    // sized to exactly the instances they need (frustumCulled left default).
+    const wedgeMeshes: WedgeMesh[] = [];
+    let prevR = 0;
+    for (const band of BANDS) {
+      const geometry = createTuftGeometry(band.planes, band.w);
+      const material = band.near ? nearMaterial : farMaterial;
+      const candidates = generateAnnulusCandidates(band.r, prevR, band.clusters);
+      const wedgeGroups = splitIntoWedges(candidates, band.wedges);
+      const perWedgeTarget = Math.ceil(band.clusters / band.wedges);
+
+      for (const group of wedgeGroups) {
+        const centres = group.slice(0, perWedgeTarget);
+        if (centres.length === 0) continue;
+        wedgeMeshes.push({
+          geometry,
+          material,
+          count: centres.length * band.perC,
+          centres,
+          perCluster: band.perC,
+          clusterRadius: band.cR,
+          heightScale: band.hs,
+        });
+      }
+      prevR = band.r;
+    }
+
+    return { wedgeMeshes, nearMaterial };
   }, []);
 
   const sitAmountRef = useRef(0);
@@ -452,26 +511,21 @@ const Grass = () => {
       sitAmountRef.current += sitDiff * Math.min(1, delta * 4);
     }
     nearMaterial.uniforms.uSitAmount.value = sitAmountRef.current;
+    nearMaterial.uniforms.uGroundedAmount.value = modelGroundedRef.value;
   });
 
   return (
     <>
-      {RINGS.map((ring, i) => {
-        const prevR = i === 0 ? 0 : RINGS[i - 1].r;
-        const total = ring.clusters * ring.perC;
-        const mat   = i <= 1 ? nearMaterial : farMaterial;
-        return (
-          <instancedMesh
-            key={i}
-            ref={(node) => {
-              if (!node) return;
-              fillRing(node, total, ring.r, prevR, ring.perC, ring.cR, ring.hs);
-            }}
-            args={[geometries[i], mat, total]}
-            frustumCulled={false}
-          />
-        );
-      })}
+      {wedgeMeshes.map((wm, i) => (
+        <instancedMesh
+          key={i}
+          ref={(node) => {
+            if (!node) return;
+            fillWedge(node, wm.centres, wm.perCluster, wm.clusterRadius, wm.heightScale);
+          }}
+          args={[wm.geometry, wm.material, wm.count]}
+        />
+      ))}
     </>
   );
 };

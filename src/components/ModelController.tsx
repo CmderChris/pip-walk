@@ -17,7 +17,7 @@ import {
 } from './modelConfig';
 import { setWeights, type AnimationActions } from './animationHelpers';
 
-import { modelWorldPos, modelSitAmountRef, modelForwardRef, modelPawPositions } from './modelState';
+import { modelWorldPos, modelSitAmountRef, modelForwardRef, modelPawPositions, modelGroundedRef } from './modelState';
 
 // Pre-allocated — never created per frame
 const _raycaster = new THREE.Raycaster();
@@ -54,8 +54,7 @@ const ModelController = () => {
 
   // ── State refs ─────────────────────────────────────────────────────────────
   const sitStateRef = useRef<SitState>('sit_loop');
-  // The dog starts in 'sit_loop', which normally skips shadow re-rendering —
-  // without this, the very first frame would never render a shadow at all.
+  // Forces an initial shadow render (dog starts in 'sit_loop', which skips updates)
   const shadowInitializedRef = useRef(false);
   const idleTimeRef = useRef(0);
   const animationWeightRef = useRef(0);
@@ -637,27 +636,30 @@ const ModelController = () => {
 
     // 9. Cancel root motion XZ; apply sine arc lift during airborne phases
     const activeState = sitStateRef.current;
+    let extraHeight = 0;
     if (activeState === 'jump_air' || activeState === 'jump_land') {
       const progress = Math.min(1, jumpAirTimeRef.current / jumpTotalDurationRef.current);
       const maxLift = jumpIsMovingRef.current ? 0.3 : 0.25;
       const arcLift = Math.max(0, maxLift * Math.sin(progress * Math.PI));
       // Exponentially decay residual lift from jump_start
       jumpLiftRef.current *= Math.exp(-delta * 15);
-      scene.position.set(0, MODEL_Y_OFFSET + arcLift + jumpLiftRef.current, 0);
+      extraHeight = arcLift + jumpLiftRef.current;
     } else if (activeState === 'jump_start') {
       const curve = jumpIsMovingRef.current ? jumpStartMoveLiftCurveRef.current : jumpStartLiftCurveRef.current;
       const action = jumpIsMovingRef.current ? actionsRef.current.jumpStartMove : actionsRef.current.jumpStart;
       if (curve && action) {
         const progress = Math.min(1, action.time / action.getClip().duration);
         const idx = Math.min(curve.length - 1, Math.floor(progress * curve.length));
-        scene.position.set(0, MODEL_Y_OFFSET + curve[idx], 0);
-      } else {
-        scene.position.set(0, MODEL_Y_OFFSET, 0);
+        extraHeight = curve[idx];
       }
     } else {
       jumpLiftRef.current = 0;
-      scene.position.set(0, MODEL_Y_OFFSET, 0);
     }
+    scene.position.set(0, MODEL_Y_OFFSET + extraHeight, 0);
+
+    // Fades grass ground-contact effects out as the dog lifts off (small
+    // window, not a hard cutoff, so takeoff/landing don't pop).
+    modelGroundedRef.value = 1 - THREE.MathUtils.smoothstep(extraHeight, 0.03, 0.16);
 
     // 10. Fixed sun position — shadow angle/length changes as model moves
     if (shadowLightRef.current) {
@@ -703,10 +705,8 @@ const ModelController = () => {
         ref={shadowLightRef}
         intensity={1.5}
         castShadow
-        // autoUpdate off — the per-frame `shadow.needsUpdate` toggle below
-        // (skip while the sit_loop pose is fully settled) only takes effect
-        // when autoUpdate is also false; otherwise the shadow map re-renders
-        // every frame regardless.
+        // autoUpdate off so the needsUpdate toggle below actually skips
+        // shadow re-renders while sit_loop is fully settled.
         shadow-autoUpdate={false}
         shadow-mapSize={[2048, 2048]}
         shadow-camera-near={1}

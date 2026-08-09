@@ -43,6 +43,12 @@ export const PLAY_AREA_FAR_Z = -25;    // world Z of the back boundary
 // Grass's shadow/backlight shaders so they can never drift out of sync.
 export const SUN_POSITION = new THREE.Vector3(0, 35, -60);
 
+// ── Fog ────────────────────────────────────────────────────────────────────
+// Shared by Scene's <fog> and Grass's fog uniforms/field radius — keeps them
+// from drifting apart the way Grass's old ring radii (out to 700) once did.
+export const FOG_NEAR = 80;
+export const FOG_FAR = 360;
+
 // ── Types ──────────────────────────────────────────────────────────────────
 export type SitState =
   | 'idle'

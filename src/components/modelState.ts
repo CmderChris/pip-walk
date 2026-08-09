@@ -7,6 +7,10 @@ export const modelWorldPos = new THREE.Vector3();
 // 0 = walking/idle, 1 = fully sitting. ModelController writes, Grass lerps toward it.
 export const modelSitAmountRef = { value: 0 };
 
+// 1 = paws on the ground, 0 = fully airborne. ModelController writes it from
+// jump height; Grass uses it to fade out ground-contact effects while jumping.
+export const modelGroundedRef = { value: 1 };
+
 // XZ forward direction of the model, updated each frame from its Y rotation.
 export const modelForwardRef = { value: new THREE.Vector2(0, 1) };
 

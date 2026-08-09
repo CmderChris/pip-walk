@@ -4,9 +4,8 @@ import * as THREE from 'three';
 
 const CameraController = () => {
   const camera = useThree((state) => state.camera);
-  // R3F's own post-debounce size — reacting to this instead of a raw window
-  // 'resize' listener keeps this in lockstep with R3F's internal camera.aspect
-  // update, which is driven by this same value (see Canvas `resize.debounce`).
+  // R3F's own post-debounce size — reacting to it keeps this in lockstep
+  // with R3F's internal camera.aspect update (driven by the same value).
   const size = useThree((state) => state.size);
 
   useEffect(() => {

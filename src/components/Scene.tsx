@@ -4,11 +4,11 @@ import { Canvas } from '@react-three/fiber';
 import { Sky, Environment } from '@react-three/drei';
 import { EffectComposer, Bloom, Vignette, N8AO } from '@react-three/postprocessing';
 import { isLowEnd } from './perfTier';
-import { SUN_POSITION } from './modelConfig';
+import { SUN_POSITION, FOG_NEAR, FOG_FAR } from './modelConfig';
 
 import CameraController from './CameraController';
 import Ground from './Ground';
-// import Grass from './Grass';
+import Grass from './Grass';
 import ModelController from './ModelController';
 import { FpsTracker, FpsDisplay } from './FpsCounter';
 
@@ -27,7 +27,7 @@ const Scene = () => {
         dpr={isLowEnd ? 1 : [1, 2]}
         resize={{ scroll: false, debounce: { scroll: 50, resize: 50 } }}
       >
-        <fog attach="fog" args={['#c8d8b0', 80, 360]} />
+        <fog attach="fog" args={['#c8d8b0', FOG_NEAR, FOG_FAR]} />
 
         <CameraController />
 
@@ -43,7 +43,7 @@ const Scene = () => {
 
         <Suspense fallback={null}>
           <Ground />
-          {/* <Grass /> */}
+          <Grass />
           <ModelController />
           {import.meta.env.DEV && <FpsTracker />}
           <Environment files="/env/park.hdr" />
