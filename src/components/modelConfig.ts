@@ -1,5 +1,5 @@
 // ── Animation clip names ───────────────────────────────────────────────────
-export const MODEL_PATH = '/models/pomeranian_model/spitz_fbx.glb';
+export const MODEL_PATH = '/models/new_dog4.glb';
 export const TEXTURE_BASE = '/models/pomeranian_model/spitz_textures/texture';
 
 export const WALK_ANIM = 'Arm_SpitzWalk_F_IP';

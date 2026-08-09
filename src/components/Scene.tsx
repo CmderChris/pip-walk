@@ -9,7 +9,7 @@ import { isLowEnd } from './perfTier';
 import CameraController from './CameraController';
 import Floor from './Floor';
 import Ground from './Ground';
-import Grass from './Grass';
+// import Grass from './Grass';
 import Boundaries from './Boundaries';
 import ModelController from './ModelController';
 import { FpsTracker, FpsDisplay } from './FpsCounter';
@@ -50,7 +50,7 @@ const Scene = () => {
 
         <Suspense fallback={null}>
           <Ground />
-          <Grass />
+          {/* <Grass /> */}
           <ModelController />
           {import.meta.env.DEV && <FpsTracker />}
         </Suspense>
