@@ -71,7 +71,7 @@ const ModelController = () => {
   const moveSpeedRef = useRef(0);
   const landingSpeedRef = useRef(1);
 
-  // ── Paw bone refs (front-left, front-right only — back paws handled by body sit zone) ──
+  // ── Front paw bones (back paws are covered by the body sit zone) ──
   const pawBonesRef = useRef<(THREE.Bone | null)[]>([null, null]);
 
   // ── Input refs ─────────────────────────────────────────────────────────────
@@ -96,7 +96,7 @@ const ModelController = () => {
   // ── Texture setup ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (!scene) return;
-    // Find the front two foot bones for grass paw interaction (back paws covered by body zone)
+    // Front foot bones, for grass paw interaction
     const pawNames = ['foot_fL_028', 'foot_fR_034'];
     scene.traverse((obj) => {
       if (obj instanceof THREE.Bone) {
@@ -107,14 +107,10 @@ const ModelController = () => {
     albedo.colorSpace = THREE.SRGBColorSpace;
     scene.traverse((obj) => {
       if (!(obj instanceof THREE.Mesh)) return;
-      obj.frustumCulled = false; // required for skinned mesh raycasting
+      // Culling disabled so animated extremities (e.g. hind paws) are never
+      // clipped, including in the shadow pass.
+      obj.frustumCulled = false;
       obj.castShadow = true;
-      // Expand bounding sphere to cover all animation poses so shadow-pass
-      // frustum culling never clips animated extremities (e.g. hind paws).
-      obj.geometry.computeBoundingSphere();
-      if (obj.geometry.boundingSphere) {
-        obj.geometry.boundingSphere.radius *= 2.0;
-      }
       const mat = obj.material as THREE.MeshStandardMaterial;
       mat.map = albedo;
       mat.normalMap = normal;
@@ -161,6 +157,8 @@ const ModelController = () => {
     const TOE_OFFSET = 0.08;
     const SAMPLES = 60;
     const buildLiftCurve = (clip: THREE.AnimationClip): Float32Array => {
+      // Match the runtime scene height so the curve is consistent across clips
+      scene.position.set(0, MODEL_Y_OFFSET, 0);
       const tmpMixer = new THREE.AnimationMixer(scene);
       const action = tmpMixer.clipAction(clip);
       action.play();
@@ -179,8 +177,7 @@ const ModelController = () => {
         curve[i] = minY < TOE_OFFSET ? TOE_OFFSET - minY : 0;
       }
       tmpMixer.stopAllAction();
-      // Reset scene position after sampling
-      scene.position.set(0, MODEL_Y_OFFSET, 0);
+      tmpMixer.uncacheRoot(scene);
       return curve;
     };
     jumpStartLiftCurveRef.current = buildLiftCurve(jumpStartClip);
@@ -265,7 +262,7 @@ const ModelController = () => {
         } else {
           a.jumpAir?.reset().play();
         }
-      } else if (e.action === a.jumpLand && sitStateRef.current === 'jump_land') {
+      } else if ((e.action === a.jumpLand || e.action === a.jumpLandMove) && sitStateRef.current === 'jump_land') {
         landingSpeedRef.current = 0.4;
       } else if (e.action === a.scratch && sitStateRef.current === 'scratch') {
         sitStateRef.current = 'sit_loop';
@@ -292,6 +289,7 @@ const ModelController = () => {
     return () => {
       mixer.removeEventListener('finished', onFinished);
       mixer.stopAllAction();
+      mixer.uncacheRoot(scene);
       mixerRef.current = null;
       actionsRef.current = {
         walk: null, idle: null,
@@ -322,11 +320,17 @@ const ModelController = () => {
       if (key === 's' || key === 'arrowdown')  keysPressedRef.current.s = false;
       if (key === 'd' || key === 'arrowright') keysPressedRef.current.d = false;
     };
+    // Key-up events are lost when the window loses focus, which would leave keys stuck
+    const handleBlur = () => {
+      keysPressedRef.current = { w: false, a: false, s: false, d: false };
+    };
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', handleBlur);
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', handleBlur);
     };
   }, []);
 
@@ -376,9 +380,7 @@ const ModelController = () => {
     const a = actionsRef.current;
 
     // 0. One-time sync: unproject the initial NDC position so worldPosRef matches
-    //    where the model actually appears on screen from frame one.
-    //    Without this, worldPosRef starts at (0,0,0) while ndcPosRef is (0,-0.3),
-    //    causing a teleport on the first move.
+    //    the on-screen position (otherwise the model teleports on the first move).
     if (!positionInitializedRef.current) {
       positionInitializedRef.current = true;
       _raycaster.setFromCamera(ndcPosRef.current, cam);
@@ -401,9 +403,8 @@ const ModelController = () => {
     const canMove = hasInput && (sitStateRef.current === 'idle' || isLanding);
     const hasJumpVelocity = jumpVelocityRef.current.lengthSq() > 0.00001;
 
-    // 2–6. Position — all raycasts skipped when model is stationary.
-    // The NDC boundary projection, 3 perspective probes, and world unproject
-    // are only needed when the model is actually moving.
+    // 2–6. Position. The boundary projection, perspective probes and unproject
+    // are skipped while the model is stationary.
     if (canMove || (isAirborne && hasJumpVelocity)) {
       // NDC boundary for far edge (only needed for clamping)
       _tempVec3.set(0, 0, PLAY_AREA_FAR_Z);
@@ -506,10 +507,10 @@ const ModelController = () => {
     const isMovingJump = jumpIsMovingRef.current;
     const activeLand  = isMovingJump ? a.jumpLandMove  : a.jumpLand;
 
-    // 8. Animation state machine
+    // 9. Animation state machine
     if (sitState === 'idle') {
       const targetWalk = canMove ? 1 : 0;
-      animationWeightRef.current += (targetWalk - animationWeightRef.current) * 5 * delta;
+      animationWeightRef.current += (targetWalk - animationWeightRef.current) * (1 - Math.exp(-5 * delta));
       animationWeightRef.current = Math.max(0, Math.min(1, animationWeightRef.current));
       setWeights(a, { walk: animationWeightRef.current, idle: 1 - animationWeightRef.current });
 
@@ -612,7 +613,7 @@ const ModelController = () => {
         jumpReturnBlendRef.current = Math.min(1, jumpReturnBlendRef.current + delta / JUMP_BLEND_TIME);
       }
       const targetWalk = hasInput ? 1 : 0;
-      animationWeightRef.current += (targetWalk - animationWeightRef.current) * 5 * delta;
+      animationWeightRef.current += (targetWalk - animationWeightRef.current) * (1 - Math.exp(-5 * delta));
       animationWeightRef.current = Math.max(0, Math.min(1, animationWeightRef.current));
       const returnBlend = jumpReturnBlendRef.current;
       setWeights(a, {
@@ -634,7 +635,7 @@ const ModelController = () => {
       if (bone) bone.getWorldPosition(modelPawPositions[i]);
     }
 
-    // 9. Cancel root motion XZ; apply sine arc lift during airborne phases
+    // 10. Cancel root motion XZ; apply sine arc lift during airborne phases
     const activeState = sitStateRef.current;
     let extraHeight = 0;
     if (activeState === 'jump_air' || activeState === 'jump_land') {
@@ -657,23 +658,21 @@ const ModelController = () => {
     }
     scene.position.set(0, MODEL_Y_OFFSET + extraHeight, 0);
 
-    // Fades grass ground-contact effects out as the dog lifts off (small
-    // window, not a hard cutoff, so takeoff/landing don't pop).
+    // Fade grass ground contact out as the dog lifts off (smooth, so takeoff/landing don't pop).
     modelGroundedRef.value = 1 - THREE.MathUtils.smoothstep(extraHeight, 0.03, 0.16);
 
-    // 10. Fixed sun position — shadow angle/length changes as model moves
+    // 11. Fixed sun position; shadow angle/length changes as the model moves
     if (shadowLightRef.current) {
       shadowLightRef.current.position.copy(SUN_POSITION);
       shadowLightRef.current.target.position.copy(worldPosRef.current);
       shadowLightRef.current.target.updateMatrixWorld();
-      // Always render at least once (covers mounting straight into sit_loop),
-      // then only re-render on frames where the pose is actually changing.
+      // Render once at start (it may mount straight into sit_loop), then only while the pose changes.
       shadowLightRef.current.shadow.needsUpdate =
         !shadowInitializedRef.current || sitStateRef.current !== 'sit_loop';
       shadowInitializedRef.current = true;
     }
 
-    // 11. Apply world position and rotation to mesh
+    // 12. Apply world position and rotation to mesh
     if (modelRef.current) {
       modelRef.current.position.copy(worldPosRef.current);
       modelWorldPos.copy(worldPosRef.current);
@@ -686,15 +685,15 @@ const ModelController = () => {
         const currentRotation = modelRef.current.rotation.y;
         let shortest = ((targetRotationRef.current - currentRotation + Math.PI) % (Math.PI * 2)) - Math.PI;
         if (shortest < -Math.PI) shortest += Math.PI * 2;
-        modelRef.current.rotation.y += shortest * ROTATION_SPEED * delta;
+        modelRef.current.rotation.y += shortest * (1 - Math.exp(-ROTATION_SPEED * delta));
       }
 
       // Tilt nose up during standing jump air phase to counteract forward lean
       modelRef.current.rotation.order = 'YXZ';
       if (!jumpIsMovingRef.current && activeState === 'jump_air') {
-        modelRef.current.rotation.x += (-0.28 - modelRef.current.rotation.x) * 10 * delta;
+        modelRef.current.rotation.x += (-0.28 - modelRef.current.rotation.x) * (1 - Math.exp(-10 * delta));
       } else {
-        modelRef.current.rotation.x += (0 - modelRef.current.rotation.x) * 20 * delta;
+        modelRef.current.rotation.x += (0 - modelRef.current.rotation.x) * (1 - Math.exp(-20 * delta));
       }
     }
   });
@@ -705,8 +704,7 @@ const ModelController = () => {
         ref={shadowLightRef}
         intensity={1.5}
         castShadow
-        // autoUpdate off so the needsUpdate toggle below actually skips
-        // shadow re-renders while sit_loop is fully settled.
+        // autoUpdate off so the needsUpdate toggle can skip shadow re-renders while sitting.
         shadow-autoUpdate={false}
         shadow-mapSize={[2048, 2048]}
         shadow-camera-near={1}
@@ -726,9 +724,3 @@ const ModelController = () => {
 };
 
 export default ModelController;
-
-declare global {
-  interface Window {
-    triggerJump?: () => void;
-  }
-}

@@ -15,7 +15,7 @@ const App = () => {
   }, []);
 
   return (
-    <div className="w-full h-full absolute inset-0">
+    <div>
       <Scene />
     </div>
   );

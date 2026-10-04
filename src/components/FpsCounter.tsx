@@ -4,11 +4,10 @@ import { isLowEnd } from './perfTier';
 
 const TARGET_FPS = isLowEnd ? 30 : 60;
 
-// Shared ref — the inner tracker (inside Canvas) writes here,
-// the outer display (outside Canvas) reads it.
+// Written by FpsTracker (inside Canvas), read by FpsDisplay (outside).
 export const fpsRef = { current: 0 };
 
-// Rendered inside <Canvas> — uses useFrame, produces no DOM.
+// Inside <Canvas>; renders no DOM.
 export const FpsTracker = () => {
   const frameCount = useRef(0);
   const elapsed = useRef(0);
@@ -26,7 +25,7 @@ export const FpsTracker = () => {
   return null;
 };
 
-// Rendered outside <Canvas> — plain DOM, no R3F involvement.
+// Outside <Canvas>; plain DOM.
 export const FpsDisplay = () => {
   const [fps, setFps] = useState<number | null>(null);
 

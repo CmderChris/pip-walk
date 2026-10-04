@@ -27,8 +27,6 @@ export const JUMP_LAND_MOVE_ANIM = 'Arm_SpitzJumpLand_F_IP';
 export const SIT_DELAY = 10;           // seconds of stillness before sitting
 export const BLEND_TIME = 0.3;         // standard crossfade duration in seconds
 export const JUMP_BLEND_TIME = 0.35;   // jump landing → idle/walk blend duration
-export const SCRATCH_INTERVAL_MIN = 15;
-export const SCRATCH_INTERVAL_MAX = 35;
 export const SIT_LOOP2_INTERVAL_MIN = 15;
 export const SIT_LOOP2_INTERVAL_MAX = 20;
 export const MOVE_SPEED = 7;           // world units/second
@@ -39,13 +37,11 @@ export const EDGE_MARGIN = 0.02;       // NDC margin inside each screen edge
 export const PLAY_AREA_FAR_Z = -25;    // world Z of the back boundary
 
 // ── Lighting ───────────────────────────────────────────────────────────────
-// Fixed "sun" position — shared by ModelController's shadow-casting light and
-// Grass's shadow/backlight shaders so they can never drift out of sync.
+// Fixed sun position, shared by the shadow-casting light and Grass's shadow/backlight shaders.
 export const SUN_POSITION = new THREE.Vector3(0, 35, -60);
 
 // ── Fog ────────────────────────────────────────────────────────────────────
-// Shared by Scene's <fog> and Grass's fog uniforms/field radius — keeps them
-// from drifting apart the way Grass's old ring radii (out to 700) once did.
+// Shared by Scene's <fog> and Grass's field radius.
 export const FOG_NEAR = 80;
 export const FOG_FAR = 360;
 

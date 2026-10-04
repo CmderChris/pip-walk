@@ -1,14 +1,11 @@
 const hasTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
 
-// Size the controls relative to the shorter screen dimension so they feel
-// consistent across phones, tablets, and landscape/portrait orientations.
-// Clamped to avoid being comically large on big tablets or tiny on small phones.
+// Control size scales with the shorter screen side, clamped to 80-130px.
 const controlSize = Math.min(130, Math.max(80, Math.round(Math.min(window.innerWidth, window.innerHeight) * 0.2)));
 
 export const createJoystick = () => {
   if (!hasTouch) return () => {};
 
-  // Create joystick container
   const joystickContainer = document.createElement('div');
   joystickContainer.style.position = 'fixed';
   joystickContainer.style.bottom = '20px';
@@ -23,7 +20,6 @@ export const createJoystick = () => {
   joystickContainer.style.zIndex = '1000';
   joystickContainer.style.touchAction = 'none';
 
-  // Create joystick knob
   const knobSize = Math.round(controlSize * 0.5);
   const joystickKnob = document.createElement('div');
   joystickKnob.style.width = `${knobSize}px`;
@@ -36,7 +32,6 @@ export const createJoystick = () => {
   joystickContainer.appendChild(joystickKnob);
   document.body.appendChild(joystickContainer);
   
-  // Touch and mouse event handlers
   let active = false;
   let touchId: number | null = null;
   
@@ -66,7 +61,6 @@ export const createJoystick = () => {
 
     const { dx, dy, maxRadius } = getJoystickPosition(clientX, clientY);
 
-    // Move knob visually
     joystickKnob.style.transform = `translate(${dx}px, ${dy}px)`;
 
     // Apply dead zone — remap the live range [DEAD_ZONE, 1] to [0, 1]
@@ -92,7 +86,7 @@ export const createJoystick = () => {
     touchId = null;
   };
   
-  // Named handlers for window events (required for proper cleanup)
+  // Named so they can be removed on cleanup
   const handleWindowMouseMove = (e: MouseEvent) => {
     updateKnobPosition(e.clientX, e.clientY);
   };
@@ -116,7 +110,6 @@ export const createJoystick = () => {
     }
   };
 
-  // Mouse events
   joystickContainer.addEventListener('mousedown', (e) => {
     active = true;
     updateKnobPosition(e.clientX, e.clientY);
@@ -125,7 +118,6 @@ export const createJoystick = () => {
   window.addEventListener('mousemove', handleWindowMouseMove);
   window.addEventListener('mouseup', handleWindowMouseUp);
 
-  // Touch events
   joystickContainer.addEventListener('touchstart', (e) => {
     if (e.touches.length > 0) {
       e.preventDefault();
@@ -138,6 +130,8 @@ export const createJoystick = () => {
 
   window.addEventListener('touchmove', handleWindowTouchMove, { passive: false });
   window.addEventListener('touchend', handleWindowTouchEnd);
+  // An interrupted touch (system gesture, notification pull-down) never sends touchend
+  window.addEventListener('touchcancel', handleWindowTouchEnd);
 
   return () => {
     document.body.removeChild(joystickContainer);
@@ -145,6 +139,7 @@ export const createJoystick = () => {
     window.removeEventListener('mouseup', handleWindowMouseUp);
     window.removeEventListener('touchmove', handleWindowTouchMove);
     window.removeEventListener('touchend', handleWindowTouchEnd);
+    window.removeEventListener('touchcancel', handleWindowTouchEnd);
   };
 };
 
@@ -206,10 +201,12 @@ export const createJumpButton = () => {
     press();
   }, { passive: false });
   window.addEventListener('touchend', handleTouchEnd);
+  window.addEventListener('touchcancel', handleTouchEnd);
 
   return () => {
     document.body.removeChild(container);
     window.removeEventListener('mouseup', handleMouseUp);
     window.removeEventListener('touchend', handleTouchEnd);
+    window.removeEventListener('touchcancel', handleTouchEnd);
   };
 };

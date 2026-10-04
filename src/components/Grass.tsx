@@ -1,27 +1,18 @@
-import { useMemo, useRef } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { useFrame } from '@react-three/fiber';
 import { isLowEnd } from './perfTier';
 import { modelWorldPos, modelSitAmountRef, modelForwardRef, modelPawPositions, modelGroundedRef } from './modelState';
-import { SUN_POSITION, FOG_NEAR, FOG_FAR } from './modelConfig';
+import { SUN_POSITION, FOG_FAR } from './modelConfig';
 
 const PLAYER_RADIUS = 0.35;
 
-// Capped just past the fog's far distance so nothing renders where it can't
-// be seen. Derives from FOG_FAR (not a separate number) so the two can't
-// drift apart the way the old rings (out to r=700) once did.
+// Just past the fog's far distance, so nothing renders where it can't be seen.
 const FIELD_RADIUS = FOG_FAR + 20;
 
-// Six distance bands (same density-falloff intent as the original rings),
-// each split into `wedges` angular tiles instead of one full-circle mesh —
-// that's the actual culling fix. three.js auto-computes a bounding sphere per
-// InstancedMesh and culls it individually (frustumCulled stays at its default
-// `true`); a single full-ring mesh always straddles the visible and invisible
-// half of the world, so it could never be culled as a whole.
-//
-// Last band replaces the old r:450 ring; the old r:700 ring (entirely past
-// the fog, never visible) is dropped. Radius derives from FIELD_RADIUS, with
-// `clusters` scaled down to match the smaller area at equal density.
+// Six distance bands with falling density, each split into `wedges` angular tiles.
+// Every tile is its own InstancedMesh, so three.js can frustum-cull the ones out
+// of view; a single full-ring mesh always straddles the view and is never culled.
 const BANDS = [
   { r:  50, planes: 3, clusters: isLowEnd ?  4_500 : 16_000, perC: 14, cR: 0.5,  w: 0.52, hs: 1.0, wedges:  6, near: true  },
   { r:  90, planes: 3, clusters: isLowEnd ?  2_800 :  9_000, perC: 12, cR: 0.7,  w: 0.52, hs: 1.0, wedges:  8, near: true  },
@@ -32,7 +23,7 @@ const BANDS = [
 ];
 
 // ─── Grass blade alpha texture ────────────────────────────────────────────────
-// Each blade: pointed at the base, widens to a peak around 45% up, tapers to a tip.
+// Blade alpha: thin point at the base, widest about a third up, tapering to a tip.
 function makeGrassAlphaTexture(size = 512): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
   canvas.width = canvas.height = size;
@@ -55,24 +46,14 @@ function makeGrassAlphaTexture(size = 512): THREE.CanvasTexture {
     const leanPx = lean * size;
     const tip    = bx + leanPx;          // x at the very top
     const midX   = bx + leanPx * 0.45;  // x at the widest point
-    const midY   = size * 0.68;          // y of widest point — longer upper taper for a pointier tip
+    const midY   = size * 0.68;          // y of widest point, from the top
 
     ctx.beginPath();
     ctx.moveTo(bx, size);  // bottom — a thin point
 
-    // Left edge: barely widen near base, swell to max width at midY, taper to tip
-    ctx.bezierCurveTo(
-      bx - bw * 0.10, size * 0.82,  // just starting to widen near the base
-      midX - bw,      midY,          // left edge at widest
-      tip,            0              // top tip
-    );
-
-    // Right edge: from top tip back down to bottom point
-    ctx.bezierCurveTo(
-      midX + bw,      midY,          // right edge at widest
-      bx + bw * 0.10, size * 0.82,  // narrowing back near the base
-      bx,             size           // back to bottom tip
-    );
+    // Left edge up to the tip, then right edge back down
+    ctx.bezierCurveTo(bx - bw * 0.10, size * 0.82, midX - bw, midY, tip, 0);
+    ctx.bezierCurveTo(midX + bw, midY, bx + bw * 0.10, size * 0.82, bx, size);
 
     ctx.fill();
   }
@@ -82,7 +63,7 @@ function makeGrassAlphaTexture(size = 512): THREE.CanvasTexture {
   return tex;
 }
 
-// ─── Noise texture (colour variation only — NOT used for wind) ────────────────
+// ─── Noise texture (colour variation only; wind uses GLSL noise) ──────────────
 function makeNoiseTexture(size = 256): THREE.DataTexture {
   function hash(x: number, y: number) {
     const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
@@ -110,8 +91,9 @@ function makeNoiseTexture(size = 256): THREE.DataTexture {
     }
   }
   const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
-  // ClampToEdge: no wrapping seams for the colour variation map
+  // ClampToEdge avoids seams; LinearFilter because DataTexture defaults to Nearest.
   tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.magFilter = tex.minFilter = THREE.LinearFilter;
   tex.needsUpdate = true;
   return tex;
 }
@@ -140,8 +122,7 @@ function createTuftGeometry(numPlanes: number, width = 0.52, height = 1.0): THRE
 // ─── Clustered placement (annulus candidates, split into angular wedges) ──────
 const _dummy = new THREE.Object3D();
 
-// Grid-samples jittered cluster-center candidates across a full annulus,
-// collected first and shuffled later (via splitIntoWedges) for uniform coverage.
+// Jittered grid of cluster-centre candidates across a circular annulus.
 function generateAnnulusCandidates(outerR: number, innerR: number, targetClusters: number): [number, number][] {
   const outerSq  = outerR * 2;
   const gridStep = Math.sqrt(outerSq * outerSq / (targetClusters * 3));
@@ -164,8 +145,8 @@ function generateAnnulusCandidates(outerR: number, innerR: number, targetCluster
   return candidates;
 }
 
-// Splits candidates into `wedgeCount` angular slices, each Fisher–Yates
-// shuffled so slicing to a per-wedge budget isn't biased by scan order.
+// Splits candidates into angular wedges and shuffles each, so a per-wedge
+// budget isn't biased by scan order.
 function splitIntoWedges(candidates: [number, number][], wedgeCount: number): [number, number][][] {
   const wedges: [number, number][][] = Array.from({ length: wedgeCount }, () => []);
   for (const [cx, cz] of candidates) {
@@ -182,8 +163,7 @@ function splitIntoWedges(candidates: [number, number][], wedgeCount: number): [n
   return wedges;
 }
 
-// Scatters `perCluster` jittered blades around each cluster center into an
-// InstancedMesh sized to exactly centres.length * perCluster instances.
+// Scatters `perCluster` jittered blades around each cluster centre.
 function fillWedge(
   node: THREE.InstancedMesh,
   centres: [number, number][],
@@ -209,11 +189,12 @@ function fillWedge(
 }
 
 // ─── Shaders ──────────────────────────────────────────────────────────────────
-// Wind uses PROCEDURAL GLSL noise — zero tiling seams regardless of field size.
-// The noise texture is only used in the fragment shader for slow colour variation
-// and is sampled with ClampToEdge so its edges never tile.
+// Wind uses procedural GLSL noise, so it never tiles. The noise texture only
+// drives slow colour variation in the fragment shader.
 
 const vertexShader = /* glsl */`
+  #include <fog_pars_vertex>
+
   uniform float uTime;
   uniform float uWindAmp;
   uniform vec3  uPlayerPos;
@@ -228,7 +209,7 @@ const vertexShader = /* glsl */`
   varying vec2  vUv;
   varying vec2  vWorldXZ;
 
-  // Procedural value noise — no texture, no tiling, no seams
+  // Procedural value noise (no texture, no tiling)
   float hash21(vec2 p) {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
   }
@@ -247,11 +228,11 @@ const vertexShader = /* glsl */`
     vWorldXZ = modelPos.xz;
     float originalY = modelPos.y; // pre-wind blade height — used for sit rotation
 
-    // Pre-calculate player distance — needed for both wind suppression and push
+    // Player distance, used by wind suppression and push
     vec2  diff = modelPos.xz - uPlayerPos.xz;
     float dist = length(diff);
 
-    // Wind suppression ellipse — always computed (needed for sit/paw zones even without animation)
+    // Wind suppression ellipse (always computed; the sit/paw zones need it too)
     vec2  windDir  = normalize(vec2(1.0, 0.5));
     float wsAlong  = dot(diff, uPlayerForward);
     float wsAcross = dot(diff, vec2(-uPlayerForward.y, uPlayerForward.x));
@@ -259,7 +240,7 @@ const vertexShader = /* glsl */`
                        ? mix(uPlayerRadius * 2.0, 1.2, uSitAmount)
                        : mix(uPlayerRadius * 2.0, 0.7, uSitAmount);
     float wsSide   = mix(uPlayerRadius * 2.0, 0.6, uSitAmount);
-    float wsEll    = sqrt(pow(wsAcross / wsSide, 2.0) + pow(wsAlong / wsLen, 2.0));
+    float wsEll    = length(vec2(wsAcross / wsSide, wsAlong / wsLen));
     float windSuppress = mix(1.0, smoothstep(0.8, 1.0, wsEll), uSitAmount);
 
 #ifdef PAW_TRACKING
@@ -284,48 +265,48 @@ const vertexShader = /* glsl */`
 #endif
 
     // ── Walking push: gentle circular lean (fades out while airborne) ──────
-    float walkFactor = smoothstep(uPlayerRadius, 0.0, dist) * (1.0 - uSitAmount) * uGroundedAmount;
+    float walkFactor = (1.0 - smoothstep(0.0, uPlayerRadius, dist)) * (1.0 - uSitAmount) * uGroundedAmount;
     modelPos.xz     += normalize(diff + vec2(0.001)) * walkFactor * 0.26 * uv.y;
 
 #ifdef PAW_TRACKING
-    // ── Per-paw push: small push at each front foot contact point (skip when sitting or airborne) ─
+    // ── Per-paw push at each front foot (skipped when sitting or airborne) ──
     if (uSitAmount < 0.99) {
       float pawStrength = 0.14 * (1.0 - uSitAmount) * uGroundedAmount;
       for (int i = 0; i < 2; i++) {
         vec2  pd    = modelPos.xz - uPawPositions[i].xz;
         float pDist = length(pd);
-        float pPush = smoothstep(0.2, 0.0, pDist) * pawStrength;
+        float pPush = (1.0 - smoothstep(0.0, 0.2, pDist)) * pawStrength;
         modelPos.xz += normalize(pd + vec2(0.001)) * pPush * uv.y;
       }
     }
 #endif
 
-    // ── Sitting push: length-preserving rotation — no stretching ───────────────
-    // Each vertex moves outward by its own pre-wind height and loses that same
-    // height, so the blade rotates from upright to flat without changing length.
+    // ── Sitting push: blades rotate flat without stretching ────────────────────
+    // Each vertex moves outward by its pre-wind height and drops by the same amount.
     float sitAlong  = dot(diff, uPlayerForward);
     float sitAcross = dot(diff, vec2(-uPlayerForward.y, uPlayerForward.x));
     float sitLen    = sitAlong < 0.0 ? 1.1 : 0.65;
     float sitSide   = 0.55;
-    float sitEll    = sqrt(pow(sitAcross / sitSide, 2.0) + pow(sitAlong / sitLen, 2.0));
-    float sitFactor = smoothstep(1.0, 0.0, sitEll) * uSitAmount;
+    float sitEll    = length(vec2(sitAcross / sitSide, sitAlong / sitLen));
+    float sitFactor = (1.0 - smoothstep(0.0, 1.0, sitEll)) * uSitAmount;
     modelPos.xz    += normalize(diff + vec2(0.001)) * sitFactor * originalY;
     modelPos.y      = mix(modelPos.y, 0.0, sitFactor);
 
-    vUv         = uv;
-    gl_Position = projectionMatrix * viewMatrix * modelPos;
+    vUv = uv;
+    vec4 mvPosition = viewMatrix * modelPos;
+    gl_Position = projectionMatrix * mvPosition;
+    #include <fog_vertex>
   }
 `;
 
 const fragmentShader = /* glsl */`
+  #include <fog_pars_fragment>
+
   uniform sampler2D uGrassAlpha;
   uniform sampler2D uNoiseTexture;
   uniform vec3      uBaseColor;
   uniform vec3      uTipColor1;
   uniform vec3      uTipColor2;
-  uniform vec3      fogColor;
-  uniform float     fogNear;
-  uniform float     fogFar;
   uniform vec3      uPlayerPos;
   uniform float     uSitAmount;
   uniform vec2      uShadowDir;  // normalized XZ direction light→model (shadow falls this way)
@@ -347,34 +328,33 @@ const fragmentShader = /* glsl */`
     // Subtly darken blade bases so they recede into the ground
     col *= mix(0.45, 1.0, smoothstep(0.0, 0.3, vUv.y));
 
-    // Backlit translucency — blades glow when sun is behind them relative to the viewer
-    // cameraPosition is a Three.js built-in uniform, always available
+    // Backlit translucency: blades glow when the sun is behind them (as seen from the camera)
     vec3  toCamera = normalize(cameraPosition - vec3(vWorldXZ.x, 0.5, vWorldXZ.y));
     vec3  sunDir   = normalize(uSunPosition); // matches scene directional light
     float backlit  = pow(max(0.0, dot(toCamera, -sunDir)), 2.0);
     col += mix(vec3(0.3, 0.7, 0.1), vec3(0.6, 1.0, 0.3), vUv.y) * (backlit * 0.4 * vUv.y);
 
-    // Fake directional shadow — asymmetric ellipse aligned with sun angle.
-    // Long axis stretches in the shadow direction, short on the sun-facing side.
+    // Fake shadow: ellipse along the sun direction, long on the shadow side, short on the sun side.
     vec2  shadowPerp = vec2(-uShadowDir.y, uShadowDir.x);
     vec2  offset     = vWorldXZ - uPlayerPos.xz;
     float along      = dot(offset, uShadowDir);
     float perp       = dot(offset, shadowPerp);
 
-    // Asymmetric half-lengths: long shadow tail, short sun-side stub
     float halfLen    = along >= 0.0 ? mix(1.5, 2.2, uSitAmount)  // shadow side
                                     : mix(0.45, 0.65, uSitAmount); // sun side
     float halfWid    = mix(0.5, 0.75, uSitAmount);
 
-    float ellDist    = sqrt(pow(perp / halfWid, 2.0) + pow(along / halfLen, 2.0));
+    float ellDist    = length(vec2(perp / halfWid, along / halfLen));
     float shadow     = (1.0 - smoothstep(0.5, 1.0, ellDist)) * 0.36;
     col             *= 1.0 - shadow;
 
-    float depth     = gl_FragCoord.z / gl_FragCoord.w;
-    float fogFactor = clamp((fogFar - depth) / (fogFar - fogNear), 0.0, 1.0);
-    col = mix(fogColor, col, fogFactor);
-
     gl_FragColor = vec4(col, 1.0);
+
+    // ShaderMaterial skips these unless included; without them, low-end grass (no
+    // composer) is untoned and unencoded. Fog goes last, as in built-in materials.
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
+    #include <fog_fragment>
   }
 `;
 
@@ -399,12 +379,11 @@ type WedgeMesh = {
 const Grass = () => {
   const timeRef = useRef(0);
 
-  const { wedgeMeshes, nearMaterial } = useMemo(() => {
+  const { wedgeMeshes, nearMaterial, disposables } = useMemo(() => {
     const alphaTexture = makeGrassAlphaTexture(512);
     const noiseTexture = makeNoiseTexture(256);
 
-    // Shared uniform objects — both materials reference the same value objects,
-    // so updating via nearMaterial automatically updates farMaterial too.
+    // Both materials share these uniform objects, so updating one updates both.
     const sharedUniforms = {
       uTime:          { value: 0 },
       uWindAmp:       { value: 0.08 },
@@ -421,10 +400,15 @@ const Grass = () => {
       uShadowDir:     { value: new THREE.Vector2(0, 1) },
       uPlayerForward: { value: new THREE.Vector2(0, 1) },
       uSunPosition:   { value: SUN_POSITION.clone() },
-      fogColor:       { value: new THREE.Color('#c8d8b0') },
-      fogNear:        { value: FOG_NEAR },
-      fogFar:         { value: FOG_FAR },
     };
+
+    // fog: true has the renderer fill the fog uniforms from Scene's <fog>. They're
+    // written per material, so each material gets its own copy.
+    const makeUniforms = (extra: Record<string, THREE.IUniform> = {}) => ({
+      ...THREE.UniformsUtils.clone(THREE.UniformsLib.fog),
+      ...sharedUniforms,
+      ...extra,
+    });
 
     const matBase = {
       vertexShader,
@@ -432,29 +416,28 @@ const Grass = () => {
       side: THREE.DoubleSide as THREE.Side,
       transparent: false,
       depthWrite:  true,
+      fog: true,
     };
 
     // Near bands (0–1): full paw tracking + animation via PAW_TRACKING/ANIMATED defines
     const nearMaterial = new THREE.ShaderMaterial({
       ...matBase,
-      uniforms: {
-        ...sharedUniforms,
+      uniforms: makeUniforms({
         uPawPositions: { value: [
           new THREE.Vector3(9999, 0, 9999),
           new THREE.Vector3(9999, 0, 9999),
         ]},
-      },
+      }),
       defines: { PAW_TRACKING: '', ANIMATED: '' },
     });
 
     // Far bands: no paw tracking or animation — saves shader cost
     const farMaterial = new THREE.ShaderMaterial({
       ...matBase,
-      uniforms: { ...sharedUniforms },
+      uniforms: makeUniforms(),
     });
 
-    // One shared geometry per band, split into per-wedge InstancedMeshes
-    // sized to exactly the instances they need (frustumCulled left default).
+    // One shared geometry per band, one InstancedMesh per wedge.
     const wedgeMeshes: WedgeMesh[] = [];
     let prevR = 0;
     for (const band of BANDS) {
@@ -480,15 +463,31 @@ const Grass = () => {
       prevR = band.r;
     }
 
-    return { wedgeMeshes, nearMaterial };
+    const disposables = [
+      alphaTexture, noiseTexture, nearMaterial, farMaterial,
+      ...new Set(wedgeMeshes.map((wm) => wm.geometry)),
+    ];
+
+    return { wedgeMeshes, nearMaterial, disposables };
   }, []);
+
+  useEffect(() => () => disposables.forEach((d) => d.dispose()), [disposables]);
+
+  // Scatter once the meshes exist. A layout effect (not an inline ref) keeps
+  // re-renders from re-randomising the field.
+  const meshRefs = useRef<(THREE.InstancedMesh | null)[]>([]);
+  useLayoutEffect(() => {
+    wedgeMeshes.forEach((wm, i) => {
+      const node = meshRefs.current[i];
+      if (node) fillWedge(node, wm.centres, wm.perCluster, wm.clusterRadius, wm.heightScale);
+    });
+  }, [wedgeMeshes]);
 
   const sitAmountRef = useRef(0);
 
   useFrame((_, delta) => {
     timeRef.current += delta;
-    // nearMaterial and farMaterial share the same underlying uniform objects,
-    // so updating via nearMaterial updates farMaterial automatically.
+    // Uniform objects are shared, so updating nearMaterial updates farMaterial too.
     nearMaterial.uniforms.uTime.value = timeRef.current;
     // Only update position-dependent uniforms when the model has actually moved
     const movedX = Math.abs(modelWorldPos.x - _prevModelXZ.x);
@@ -502,7 +501,7 @@ const Grass = () => {
     nearMaterial.uniforms.uPlayerForward.value.copy(modelForwardRef.value);
     const pawUniforms = nearMaterial.uniforms.uPawPositions.value as THREE.Vector3[];
     for (let i = 0; i < 2; i++) pawUniforms[i].copy(modelPawPositions[i]);
-    // Smooth transition into/out of sitting — snap when close to avoid infinite ticking
+    // Ease into/out of sitting; snap when close so it stops updating
     const sitTarget = modelSitAmountRef.value;
     const sitDiff = sitTarget - sitAmountRef.current;
     if (Math.abs(sitDiff) < 0.001) {
@@ -519,10 +518,7 @@ const Grass = () => {
       {wedgeMeshes.map((wm, i) => (
         <instancedMesh
           key={i}
-          ref={(node) => {
-            if (!node) return;
-            fillWedge(node, wm.centres, wm.perCluster, wm.clusterRadius, wm.heightScale);
-          }}
+          ref={(node) => { meshRefs.current[i] = node; }}
           args={[wm.geometry, wm.material, wm.count]}
         />
       ))}

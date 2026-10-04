@@ -1,9 +1,9 @@
-// Synchronous performance tier detection.
-// Uses CPU thread count and reported RAM (Chrome/Edge only) to classify devices.
-// This catches Windows tablets, low-end laptops, and phones that slip through a
-// simple mobile UA check (e.g. Surface Go 2 reports a desktop Windows user agent).
+// Synchronous performance tier: a mobile UA or <=4 CPU threads counts as low-end.
+// The thread check catches devices with a desktop UA (e.g. Surface Go 2).
 
-const mobileUA = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+// iPadOS 13+ reports a desktop Mac user agent, so spot it by touch support.
+const isIPadOS = /Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1;
+const mobileUA = isIPadOS || /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
 const cores    = navigator.hardwareConcurrency ?? 8;
 
 export const isLowEnd = mobileUA || cores <= 4;

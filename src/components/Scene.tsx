@@ -23,7 +23,7 @@ const Scene = () => {
       overflow: 'hidden'
     }}>
       <Canvas
-        shadows={isLowEnd ? false : { type: THREE.PCFSoftShadowMap }}
+        shadows={isLowEnd ? false : { type: THREE.PCFShadowMap }}
         dpr={isLowEnd ? 1 : [1, 2]}
         resize={{ scroll: false, debounce: { scroll: 50, resize: 50 } }}
       >
