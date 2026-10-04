@@ -1,5 +1,7 @@
+import * as THREE from 'three';
+
 // ── Animation clip names ───────────────────────────────────────────────────
-export const MODEL_PATH = '/models/pomeranian_model/spitz_fbx.glb';
+export const MODEL_PATH = '/models/new_dog4.glb';
 export const TEXTURE_BASE = '/models/pomeranian_model/spitz_textures/texture';
 
 export const WALK_ANIM = 'Arm_SpitzWalk_F_IP';
@@ -25,16 +27,23 @@ export const JUMP_LAND_MOVE_ANIM = 'Arm_SpitzJumpLand_F_IP';
 export const SIT_DELAY = 10;           // seconds of stillness before sitting
 export const BLEND_TIME = 0.3;         // standard crossfade duration in seconds
 export const JUMP_BLEND_TIME = 0.35;   // jump landing → idle/walk blend duration
-export const SCRATCH_INTERVAL_MIN = 15;
-export const SCRATCH_INTERVAL_MAX = 35;
 export const SIT_LOOP2_INTERVAL_MIN = 15;
 export const SIT_LOOP2_INTERVAL_MAX = 20;
 export const MOVE_SPEED = 7;           // world units/second
-export const MODEL_Y_OFFSET = 0.25;    // lifts model so feet don't clip ground
+export const MODEL_Y_OFFSET = 0.04;    // lifts model so feet don't clip ground
 export const ROTATION_SPEED = 10;
 export const MIN_SPEED_FOR_WALK = 0.5;
 export const EDGE_MARGIN = 0.02;       // NDC margin inside each screen edge
 export const PLAY_AREA_FAR_Z = -25;    // world Z of the back boundary
+
+// ── Lighting ───────────────────────────────────────────────────────────────
+// Fixed sun position, shared by the shadow-casting light and Grass's shadow/backlight shaders.
+export const SUN_POSITION = new THREE.Vector3(0, 35, -60);
+
+// ── Fog ────────────────────────────────────────────────────────────────────
+// Shared by Scene's <fog> and Grass's field radius.
+export const FOG_NEAR = 80;
+export const FOG_FAR = 360;
 
 // ── Types ──────────────────────────────────────────────────────────────────
 export type SitState =

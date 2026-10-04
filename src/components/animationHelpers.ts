@@ -17,10 +17,7 @@ export type AnimationActions = {
   petStand: THREE.AnimationAction | null;
 };
 
-/**
- * Sets effective weights on all actions. Any key not present in `weights`
- * is zeroed out automatically.
- */
+/** Sets effective weights on all actions; keys missing from `weights` are zeroed. */
 export function setWeights(
   actions: AnimationActions,
   weights: Partial<Record<keyof AnimationActions, number>>

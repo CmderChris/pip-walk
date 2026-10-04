@@ -12,9 +12,12 @@ import {
   SIT_LOOP2_INTERVAL_MIN, SIT_LOOP2_INTERVAL_MAX,
   MOVE_SPEED, MODEL_Y_OFFSET, ROTATION_SPEED, MIN_SPEED_FOR_WALK,
   EDGE_MARGIN, PLAY_AREA_FAR_Z,
+  SUN_POSITION,
   type SitState,
 } from './modelConfig';
 import { setWeights, type AnimationActions } from './animationHelpers';
+
+import { modelWorldPos, modelSitAmountRef, modelForwardRef, modelPawPositions, modelGroundedRef } from './modelState';
 
 // Pre-allocated — never created per frame
 const _raycaster = new THREE.Raycaster();
@@ -28,7 +31,9 @@ const _inputVec2 = new THREE.Vector2();
 const ModelController = () => {
   const { scene, animations } = useGLTF(MODEL_PATH, true);
   const modelRef = useRef<THREE.Group>(null);
-  const { camera, gl } = useThree();
+  const shadowLightRef = useRef<THREE.DirectionalLight>(null!);
+  const { camera, gl, scene: threeScene } = useThree();
+
 
   const [albedo, normal, roughness, ao] = useTexture([
     `${TEXTURE_BASE}/Spitz_Albedo3.png`,
@@ -48,7 +53,9 @@ const ModelController = () => {
   });
 
   // ── State refs ─────────────────────────────────────────────────────────────
-  const sitStateRef = useRef<SitState>('idle');
+  const sitStateRef = useRef<SitState>('sit_loop');
+  // Forces an initial shadow render (dog starts in 'sit_loop', which skips updates)
+  const shadowInitializedRef = useRef(false);
   const idleTimeRef = useRef(0);
   const animationWeightRef = useRef(0);
   const sitLoop2TimerRef = useRef(
@@ -56,17 +63,25 @@ const ModelController = () => {
   );
 
   // ── Movement refs ──────────────────────────────────────────────────────────
-  const ndcPosRef = useRef(new THREE.Vector2(0, -0.5));
+  const ndcPosRef = useRef(new THREE.Vector2(0, -0.3));
   const worldPosRef = useRef(new THREE.Vector3(0, 0, 0));
+  const positionInitializedRef = useRef(false);
   const currentSpeedRef = useRef(0);
   const targetRotationRef = useRef(0);
   const moveSpeedRef = useRef(0);
   const landingSpeedRef = useRef(1);
 
+  // ── Front paw bones (back paws are covered by the body sit zone) ──
+  const pawBonesRef = useRef<(THREE.Bone | null)[]>([null, null]);
+
   // ── Input refs ─────────────────────────────────────────────────────────────
   const keysPressedRef = useRef({ w: false, a: false, s: false, d: false });
   const joystickRef = useRef({ x: 0, y: 0 });
   const jumpPressedRef = useRef(false);
+
+  const jumpLiftRef = useRef(0);
+  const jumpStartLiftCurveRef = useRef<Float32Array | null>(null);
+  const jumpStartMoveLiftCurveRef = useRef<Float32Array | null>(null);
 
   // ── Jump refs ──────────────────────────────────────────────────────────────
   const petTriggeredRef = useRef(false);
@@ -81,10 +96,21 @@ const ModelController = () => {
   // ── Texture setup ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (!scene) return;
+    // Front foot bones, for grass paw interaction
+    const pawNames = ['foot_fL_028', 'foot_fR_034'];
+    scene.traverse((obj) => {
+      if (obj instanceof THREE.Bone) {
+        const idx = pawNames.indexOf(obj.name);
+        if (idx !== -1) pawBonesRef.current[idx] = obj;
+      }
+    });
     albedo.colorSpace = THREE.SRGBColorSpace;
     scene.traverse((obj) => {
       if (!(obj instanceof THREE.Mesh)) return;
-      obj.frustumCulled = false; // required for skinned mesh raycasting
+      // Culling disabled so animated extremities (e.g. hind paws) are never
+      // clipped, including in the shadow pass.
+      obj.frustumCulled = false;
+      obj.castShadow = true;
       const mat = obj.material as THREE.MeshStandardMaterial;
       mat.map = albedo;
       mat.normalMap = normal;
@@ -93,6 +119,14 @@ const ModelController = () => {
       mat.needsUpdate = true;
     });
   }, [scene, albedo, normal, roughness, ao]);
+
+  // ── Add shadow light target to scene graph ────────────────────────────────
+  useEffect(() => {
+    const light = shadowLightRef.current;
+    if (!light) return;
+    threeScene.add(light.target);
+    return () => { threeScene.remove(light.target); };
+  }, [threeScene]);
 
   // ── Animation setup ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -119,6 +153,36 @@ const ModelController = () => {
         !jumpStartMoveClip || !jumpAirMoveClip || !jumpLandMoveClip ||
         !scratchClip || !sitLoop2Clip || !petStandClip) return;
 
+    // Pre-sample jump start clips to build a per-frame lift correction curve
+    const TOE_OFFSET = 0.08;
+    const SAMPLES = 60;
+    const buildLiftCurve = (clip: THREE.AnimationClip): Float32Array => {
+      // Match the runtime scene height so the curve is consistent across clips
+      scene.position.set(0, MODEL_Y_OFFSET, 0);
+      const tmpMixer = new THREE.AnimationMixer(scene);
+      const action = tmpMixer.clipAction(clip);
+      action.play();
+      const curve = new Float32Array(SAMPLES);
+      for (let i = 0; i < SAMPLES; i++) {
+        const t = (i / (SAMPLES - 1)) * clip.duration;
+        tmpMixer.setTime(t);
+        scene.updateMatrixWorld(true);
+        let minY = Infinity;
+        scene.traverse((obj) => {
+          if (obj instanceof THREE.Bone) {
+            _tempVec3.setFromMatrixPosition(obj.matrixWorld);
+            if (_tempVec3.y < minY) minY = _tempVec3.y;
+          }
+        });
+        curve[i] = minY < TOE_OFFSET ? TOE_OFFSET - minY : 0;
+      }
+      tmpMixer.stopAllAction();
+      tmpMixer.uncacheRoot(scene);
+      return curve;
+    };
+    jumpStartLiftCurveRef.current = buildLiftCurve(jumpStartClip);
+    jumpStartMoveLiftCurveRef.current = buildLiftCurve(jumpStartMoveClip);
+
     const mixer = new THREE.AnimationMixer(scene);
 
     const idleAction = mixer.clipAction(idleClip);
@@ -134,7 +198,7 @@ const ModelController = () => {
     sitStartAction.clampWhenFinished = true;
 
     const sitIdleAction = mixer.clipAction(sitIdleClip);
-    sitIdleAction.setEffectiveWeight(0);
+    sitIdleAction.setEffectiveWeight(1);
     sitIdleAction.play();
 
     const sitEndAction = mixer.clipAction(sitEndClip);
@@ -198,7 +262,7 @@ const ModelController = () => {
         } else {
           a.jumpAir?.reset().play();
         }
-      } else if (e.action === a.jumpLand && sitStateRef.current === 'jump_land') {
+      } else if ((e.action === a.jumpLand || e.action === a.jumpLandMove) && sitStateRef.current === 'jump_land') {
         landingSpeedRef.current = 0.4;
       } else if (e.action === a.scratch && sitStateRef.current === 'scratch') {
         sitStateRef.current = 'sit_loop';
@@ -225,6 +289,7 @@ const ModelController = () => {
     return () => {
       mixer.removeEventListener('finished', onFinished);
       mixer.stopAllAction();
+      mixer.uncacheRoot(scene);
       mixerRef.current = null;
       actionsRef.current = {
         walk: null, idle: null,
@@ -255,11 +320,17 @@ const ModelController = () => {
       if (key === 's' || key === 'arrowdown')  keysPressedRef.current.s = false;
       if (key === 'd' || key === 'arrowright') keysPressedRef.current.d = false;
     };
+    // Key-up events are lost when the window loses focus, which would leave keys stuck
+    const handleBlur = () => {
+      keysPressedRef.current = { w: false, a: false, s: false, d: false };
+    };
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', handleBlur);
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', handleBlur);
     };
   }, []);
 
@@ -284,9 +355,8 @@ const ModelController = () => {
         ((clientX - rect.left) / rect.width) * 2 - 1,
         -((clientY - rect.top) / rect.height) * 2 + 1
       );
-      const ray = new THREE.Raycaster();
-      ray.setFromCamera(ndc, camera);
-      const hits = ray.intersectObject(modelRef.current, true);
+      _raycaster.setFromCamera(ndc, camera);
+      const hits = _raycaster.intersectObject(modelRef.current, true);
       if (hits.length > 0 && pettableStates.includes(sitStateRef.current)) {
         petTriggeredRef.current = true;
       }
@@ -309,12 +379,18 @@ const ModelController = () => {
     const cam = state.camera as THREE.PerspectiveCamera;
     const a = actionsRef.current;
 
-    // 1. NDC boundary for far edge of play area
-    _tempVec3.set(0, 0, PLAY_AREA_FAR_Z);
-    _tempVec3.project(cam);
-    const farNDCY = _tempVec3.y;
+    // 0. One-time sync: unproject the initial NDC position so worldPosRef matches
+    //    the on-screen position (otherwise the model teleports on the first move).
+    if (!positionInitializedRef.current) {
+      positionInitializedRef.current = true;
+      _raycaster.setFromCamera(ndcPosRef.current, cam);
+      if (_raycaster.ray.intersectPlane(_groundPlane, _groundPoint)) {
+        _groundPoint.y = 0;
+        worldPosRef.current.copy(_groundPoint);
+      }
+    }
 
-    // 2. Input
+    // 1. Input
     const keys = keysPressedRef.current;
     const joystick = joystickRef.current;
     _inputVec2.set(
@@ -325,59 +401,66 @@ const ModelController = () => {
     const isAirborne = sitStateRef.current === 'jump_start' || sitStateRef.current === 'jump_air';
     const isLanding = sitStateRef.current === 'jump_land';
     const canMove = hasInput && (sitStateRef.current === 'idle' || isLanding);
+    const hasJumpVelocity = jumpVelocityRef.current.lengthSq() > 0.00001;
 
-    // 3. Perspective probes — world-units-per-NDC at current position
-    const PROBE = 0.001;
-    const cx = ndcPosRef.current.x;
-    const cy = ndcPosRef.current.y;
+    // 2–6. Position. The boundary projection, perspective probes and unproject
+    // are skipped while the model is stationary.
+    if (canMove || (isAirborne && hasJumpVelocity)) {
+      // NDC boundary for far edge (only needed for clamping)
+      _tempVec3.set(0, 0, PLAY_AREA_FAR_Z);
+      _tempVec3.project(cam);
+      const farNDCY = _tempVec3.y;
 
-    _raycaster.setFromCamera(ndcPosRef.current, cam);
-    _raycaster.ray.intersectPlane(_groundPlane, _groundPoint);
+      // Perspective probes — world-units-per-NDC at current position
+      const PROBE = 0.001;
+      const cx = ndcPosRef.current.x;
+      const cy = ndcPosRef.current.y;
 
-    _ndcSample.set(cx + PROBE, cy);
-    _raycaster.setFromCamera(_ndcSample, cam);
-    _raycaster.ray.intersectPlane(_groundPlane, _probePoint);
-    const worldPerNdcX = _probePoint.distanceTo(_groundPoint) / PROBE;
+      _raycaster.setFromCamera(ndcPosRef.current, cam);
+      _raycaster.ray.intersectPlane(_groundPlane, _groundPoint);
 
-    _ndcSample.set(cx, cy + PROBE);
-    _raycaster.setFromCamera(_ndcSample, cam);
-    _raycaster.ray.intersectPlane(_groundPlane, _probePoint);
-    const worldPerNdcY = _probePoint.distanceTo(_groundPoint) / PROBE;
+      _ndcSample.set(cx + PROBE, cy);
+      _raycaster.setFromCamera(_ndcSample, cam);
+      _raycaster.ray.intersectPlane(_groundPlane, _probePoint);
+      const worldPerNdcX = _probePoint.distanceTo(_groundPoint) / PROBE;
 
-    // 4. Movement
-    if (canMove) {
-      _inputVec2.normalize();
-      moveSpeedRef.current = Math.min(1, moveSpeedRef.current + delta * 6);
-      landingSpeedRef.current = Math.min(1, landingSpeedRef.current + delta * 8);
-      const spd = MOVE_SPEED * delta * moveSpeedRef.current * landingSpeedRef.current;
-      ndcPosRef.current.x += _inputVec2.x * (spd / Math.max(worldPerNdcX, 0.001));
-      ndcPosRef.current.y += _inputVec2.y * (spd / Math.max(worldPerNdcY, 0.001));
-      jumpVelocityRef.current.copy(_inputVec2);
-    } else if (isAirborne && jumpVelocityRef.current.lengthSq() > 0.00001) {
-      const spd = MOVE_SPEED * delta * moveSpeedRef.current;
-      ndcPosRef.current.x += jumpVelocityRef.current.x * (spd / Math.max(worldPerNdcX, 0.001));
-      ndcPosRef.current.y += jumpVelocityRef.current.y * (spd / Math.max(worldPerNdcY, 0.001));
-    } else if (!isAirborne && !isLanding) {
-      moveSpeedRef.current = 0;
-      jumpVelocityRef.current.set(0, 0);
-    }
+      _ndcSample.set(cx, cy + PROBE);
+      _raycaster.setFromCamera(_ndcSample, cam);
+      _raycaster.ray.intersectPlane(_groundPlane, _probePoint);
+      const worldPerNdcY = _probePoint.distanceTo(_groundPoint) / PROBE;
 
-    // 5. Clamp NDC to play area
-    ndcPosRef.current.x = Math.max(-1 + EDGE_MARGIN, Math.min(1 - EDGE_MARGIN, ndcPosRef.current.x));
-    ndcPosRef.current.y = Math.max(-1 + EDGE_MARGIN, Math.min(farNDCY - EDGE_MARGIN, ndcPosRef.current.y));
+      if (canMove) {
+        _inputVec2.normalize();
+        moveSpeedRef.current = Math.min(1, moveSpeedRef.current + delta * 6);
+        landingSpeedRef.current = Math.min(1, landingSpeedRef.current + delta * 8);
+        const spd = MOVE_SPEED * delta * moveSpeedRef.current * landingSpeedRef.current;
+        ndcPosRef.current.x += _inputVec2.x * (spd / Math.max(worldPerNdcX, 0.001));
+        ndcPosRef.current.y += _inputVec2.y * (spd / Math.max(worldPerNdcY, 0.001));
+        jumpVelocityRef.current.copy(_inputVec2);
+      } else {
+        const spd = MOVE_SPEED * delta * moveSpeedRef.current;
+        ndcPosRef.current.x += jumpVelocityRef.current.x * (spd / Math.max(worldPerNdcX, 0.001));
+        ndcPosRef.current.y += jumpVelocityRef.current.y * (spd / Math.max(worldPerNdcY, 0.001));
+      }
 
-    // 6. Unproject NDC → world position
-    _raycaster.setFromCamera(ndcPosRef.current, cam);
-    if (_raycaster.ray.intersectPlane(_groundPlane, _groundPoint)) {
-      _groundPoint.y = 0;
-      if (canMove || (isAirborne && jumpVelocityRef.current.lengthSq() > 0.00001)) {
+      // Clamp NDC to play area
+      ndcPosRef.current.x = Math.max(-1 + EDGE_MARGIN, Math.min(1 - EDGE_MARGIN, ndcPosRef.current.x));
+      ndcPosRef.current.y = Math.max(-1 + EDGE_MARGIN, Math.min(farNDCY - EDGE_MARGIN, ndcPosRef.current.y));
+
+      // Unproject NDC → world position
+      _raycaster.setFromCamera(ndcPosRef.current, cam);
+      if (_raycaster.ray.intersectPlane(_groundPlane, _groundPoint)) {
+        _groundPoint.y = 0;
         const dx = _groundPoint.x - worldPosRef.current.x;
         const dz = _groundPoint.z - worldPosRef.current.z;
         if (Math.abs(dx) > 0.0001 || Math.abs(dz) > 0.0001) {
           targetRotationRef.current = Math.atan2(dx, dz);
         }
+        worldPosRef.current.copy(_groundPoint);
       }
-      worldPosRef.current.copy(_groundPoint);
+    } else if (!isAirborne && !isLanding) {
+      moveSpeedRef.current = 0;
+      jumpVelocityRef.current.set(0, 0);
     }
 
     // 7. Pet / scratch trigger
@@ -400,6 +483,7 @@ const ModelController = () => {
       jumpPressedRef.current = false;
       if (sitStateRef.current === 'idle') {
         sitStateRef.current = 'jump_start';
+        jumpLiftRef.current = 0.4;
         animationWeightRef.current = 0;
         idleTimeRef.current = 0;
         jumpAirTimeRef.current = 0;
@@ -423,10 +507,10 @@ const ModelController = () => {
     const isMovingJump = jumpIsMovingRef.current;
     const activeLand  = isMovingJump ? a.jumpLandMove  : a.jumpLand;
 
-    // 8. Animation state machine
+    // 9. Animation state machine
     if (sitState === 'idle') {
       const targetWalk = canMove ? 1 : 0;
-      animationWeightRef.current += (targetWalk - animationWeightRef.current) * 5 * delta;
+      animationWeightRef.current += (targetWalk - animationWeightRef.current) * (1 - Math.exp(-5 * delta));
       animationWeightRef.current = Math.max(0, Math.min(1, animationWeightRef.current));
       setWeights(a, { walk: animationWeightRef.current, idle: 1 - animationWeightRef.current });
 
@@ -529,7 +613,7 @@ const ModelController = () => {
         jumpReturnBlendRef.current = Math.min(1, jumpReturnBlendRef.current + delta / JUMP_BLEND_TIME);
       }
       const targetWalk = hasInput ? 1 : 0;
-      animationWeightRef.current += (targetWalk - animationWeightRef.current) * 5 * delta;
+      animationWeightRef.current += (targetWalk - animationWeightRef.current) * (1 - Math.exp(-5 * delta));
       animationWeightRef.current = Math.max(0, Math.min(1, animationWeightRef.current));
       const returnBlend = jumpReturnBlendRef.current;
       setWeights(a, {
@@ -545,49 +629,98 @@ const ModelController = () => {
     }
 
     mixerRef.current?.update(delta);
+    // Update front paw world positions for grass interaction
+    for (let i = 0; i < 2; i++) {
+      const bone = pawBonesRef.current[i];
+      if (bone) bone.getWorldPosition(modelPawPositions[i]);
+    }
 
-    // 9. Cancel root motion XZ; apply sine arc lift during airborne phases
+    // 10. Cancel root motion XZ; apply sine arc lift during airborne phases
     const activeState = sitStateRef.current;
+    let extraHeight = 0;
     if (activeState === 'jump_air' || activeState === 'jump_land') {
       const progress = Math.min(1, jumpAirTimeRef.current / jumpTotalDurationRef.current);
       const maxLift = jumpIsMovingRef.current ? 0.3 : 0.25;
-      scene.position.set(0, MODEL_Y_OFFSET + Math.max(0, maxLift * Math.sin(progress * Math.PI)), 0);
+      const arcLift = Math.max(0, maxLift * Math.sin(progress * Math.PI));
+      // Exponentially decay residual lift from jump_start
+      jumpLiftRef.current *= Math.exp(-delta * 15);
+      extraHeight = arcLift + jumpLiftRef.current;
+    } else if (activeState === 'jump_start') {
+      const curve = jumpIsMovingRef.current ? jumpStartMoveLiftCurveRef.current : jumpStartLiftCurveRef.current;
+      const action = jumpIsMovingRef.current ? actionsRef.current.jumpStartMove : actionsRef.current.jumpStart;
+      if (curve && action) {
+        const progress = Math.min(1, action.time / action.getClip().duration);
+        const idx = Math.min(curve.length - 1, Math.floor(progress * curve.length));
+        extraHeight = curve[idx];
+      }
     } else {
-      scene.position.set(0, MODEL_Y_OFFSET, 0);
+      jumpLiftRef.current = 0;
+    }
+    scene.position.set(0, MODEL_Y_OFFSET + extraHeight, 0);
+
+    // Fade grass ground contact out as the dog lifts off (smooth, so takeoff/landing don't pop).
+    modelGroundedRef.value = 1 - THREE.MathUtils.smoothstep(extraHeight, 0.03, 0.16);
+
+    // 11. Fixed sun position; shadow angle/length changes as the model moves
+    if (shadowLightRef.current) {
+      shadowLightRef.current.position.copy(SUN_POSITION);
+      shadowLightRef.current.target.position.copy(worldPosRef.current);
+      shadowLightRef.current.target.updateMatrixWorld();
+      // Render once at start (it may mount straight into sit_loop), then only while the pose changes.
+      shadowLightRef.current.shadow.needsUpdate =
+        !shadowInitializedRef.current || sitStateRef.current !== 'sit_loop';
+      shadowInitializedRef.current = true;
     }
 
-    // 10. Apply world position and rotation to mesh
+    // 12. Apply world position and rotation to mesh
     if (modelRef.current) {
       modelRef.current.position.copy(worldPosRef.current);
+      modelWorldPos.copy(worldPosRef.current);
+      const s = sitStateRef.current;
+      modelSitAmountRef.value = (s === 'sit_loop' || s === 'sit_loop2' || s === 'sit_start' || s === 'scratch') ? 1 : 0;
+      const ry = modelRef.current.rotation.y;
+      modelForwardRef.value.set(Math.sin(ry), Math.cos(ry));
 
       if (currentSpeedRef.current > MIN_SPEED_FOR_WALK) {
         const currentRotation = modelRef.current.rotation.y;
         let shortest = ((targetRotationRef.current - currentRotation + Math.PI) % (Math.PI * 2)) - Math.PI;
         if (shortest < -Math.PI) shortest += Math.PI * 2;
-        modelRef.current.rotation.y += shortest * ROTATION_SPEED * delta;
+        modelRef.current.rotation.y += shortest * (1 - Math.exp(-ROTATION_SPEED * delta));
       }
 
       // Tilt nose up during standing jump air phase to counteract forward lean
       modelRef.current.rotation.order = 'YXZ';
       if (!jumpIsMovingRef.current && activeState === 'jump_air') {
-        modelRef.current.rotation.x += (-0.28 - modelRef.current.rotation.x) * 10 * delta;
+        modelRef.current.rotation.x += (-0.28 - modelRef.current.rotation.x) * (1 - Math.exp(-10 * delta));
       } else {
-        modelRef.current.rotation.x += (0 - modelRef.current.rotation.x) * 20 * delta;
+        modelRef.current.rotation.x += (0 - modelRef.current.rotation.x) * (1 - Math.exp(-20 * delta));
       }
     }
   });
 
   return (
-    <group ref={modelRef}>
-      <primitive object={scene} scale={4.0} />
-    </group>
+    <>
+      <directionalLight
+        ref={shadowLightRef}
+        intensity={1.5}
+        castShadow
+        // autoUpdate off so the needsUpdate toggle can skip shadow re-renders while sitting.
+        shadow-autoUpdate={false}
+        shadow-mapSize={[2048, 2048]}
+        shadow-camera-near={1}
+        shadow-camera-far={120}
+        shadow-camera-left={-30}
+        shadow-camera-right={30}
+        shadow-camera-top={30}
+        shadow-camera-bottom={-30}
+        shadow-bias={-0.0005}
+        shadow-normalBias={0.05}
+      />
+      <group ref={modelRef}>
+        <primitive object={scene} scale={4.0} />
+      </group>
+    </>
   );
 };
 
 export default ModelController;
-
-declare global {
-  interface Window {
-    triggerJump?: () => void;
-  }
-}
