@@ -5,13 +5,14 @@ import { useTexture } from '@react-three/drei'
 import { cameraFocus } from './modelState'
 import { curveDropGLSL, curveUniforms } from './worldCurve'
 
-// The plane only needs to reach past the curved horizon / fog. It follows the
-// camera focus in whole texture tiles, so the world-space texture pattern never shifts.
-const GROUND_SIZE = 800
-const GROUND_REPEAT = 120
+// The plane only needs to reach past the fog (80 from the camera, which sits ~16 behind
+// the focus) and the curved horizon. It follows the camera focus in whole texture tiles,
+// so the world-space texture pattern never shifts. 200/30 keeps the original 6.67-unit tile.
+const GROUND_SIZE = 200
+const GROUND_REPEAT = 30
 const TILE = GROUND_SIZE / GROUND_REPEAT
-// Enough vertices to follow the curve smoothly (a flat quad can't bend).
-const GROUND_SEGMENTS = 160
+// Enough vertices (5 units apart) to follow the curve smoothly (a flat quad can't bend).
+const GROUND_SEGMENTS = 40
 
 const Ground: React.FC = () => {
   const normalMap = useTexture('/textures/Ground103_1K-PNG_NormalGL.png')

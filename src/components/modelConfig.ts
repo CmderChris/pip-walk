@@ -44,11 +44,15 @@ export const PLAY_AREA_FAR_Z = -25;    // Z (relative to the camera focus) beyon
 // dead zone (NDC units); pushing past an edge scrolls the world (moves the camera)
 // at the model's speed instead of moving the model on screen. Widen halfX/halfY
 // for a looser feel, shrink them to pin the model closer to the centre.
-export const DEAD_ZONE = { centerX: 0, centerY: -0.3, halfX: 0.15, halfY: 0.12 };
+export const DEAD_ZONE = { centerX: 0, centerY: -0.3, halfX: 0.11, halfY: 0.09 };
 // Where the model starts on screen: the dead zone's centre.
 export const START_NDC = { x: DEAD_ZONE.centerX, y: DEAD_ZONE.centerY };
 // How quickly the movement direction follows the input (1/s). Higher = snappier turns.
 export const DIRECTION_SMOOTHING = 14;
+
+// ── Camera ─────────────────────────────────────────────────────────────────
+// 50° vertical FOV (the default 75° stretches things near the screen edges).
+export const CAMERA_FOV = 50;
 
 // ── World curvature ────────────────────────────────────────────────────────
 // Ground and grass drop by CURVE_STRENGTH * (CURVE_X_WEIGHT * dx² + dz²) with
