@@ -1,13 +1,18 @@
 const hasTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
 
-// Control size scales with the shorter screen side, clamped to 80-130px.
-const controlSize = Math.min(130, Math.max(80, Math.round(Math.min(window.innerWidth, window.innerHeight) * 0.2)));
+import { controlBus } from './controlBus';
 
-export const createJoystick = () => {
+// Control size scales with the shorter side of the container, clamped to 80-130px.
+const controlSizeFor = (parent: HTMLElement) =>
+  Math.min(130, Math.max(80, Math.round(Math.min(parent.clientWidth, parent.clientHeight) * 0.2)));
+
+// Both controls are placed inside `parent` (which must be positioned) so they stay with the scene.
+export const createJoystick = (parent: HTMLElement) => {
   if (!hasTouch) return () => {};
+  const controlSize = controlSizeFor(parent);
 
   const joystickContainer = document.createElement('div');
-  joystickContainer.style.position = 'fixed';
+  joystickContainer.style.position = 'absolute';
   joystickContainer.style.bottom = '20px';
   joystickContainer.style.left = '20px';
   joystickContainer.style.width = `${controlSize}px`;
@@ -30,7 +35,7 @@ export const createJoystick = () => {
   joystickKnob.style.touchAction = 'none';
   
   joystickContainer.appendChild(joystickKnob);
-  document.body.appendChild(joystickContainer);
+  parent.appendChild(joystickContainer);
   
   let active = false;
   let touchId: number | null = null;
@@ -64,24 +69,22 @@ export const createJoystick = () => {
     joystickKnob.style.transform = `translate(${dx}px, ${dy}px)`;
 
     // Apply dead zone — remap the live range [DEAD_ZONE, 1] to [0, 1]
-    if (window.updateJoystick) {
+    if (controlBus.joystick) {
       const nx = dx / maxRadius;
       const ny = dy / maxRadius;
       const dist = Math.sqrt(nx * nx + ny * ny);
       if (dist < DEAD_ZONE) {
-        window.updateJoystick(0, 0);
+        controlBus.joystick(0, 0);
       } else {
         const scale = (dist - DEAD_ZONE) / (1 - DEAD_ZONE) / dist;
-        window.updateJoystick(nx * scale, ny * scale);
+        controlBus.joystick(nx * scale, ny * scale);
       }
     }
   };
-  
+
   const resetKnob = () => {
     joystickKnob.style.transform = 'translate(0px, 0px)';
-    if (window.updateJoystick) {
-      window.updateJoystick(0, 0);
-    }
+    controlBus.joystick?.(0, 0);
     active = false;
     touchId = null;
   };
@@ -134,7 +137,7 @@ export const createJoystick = () => {
   window.addEventListener('touchcancel', handleWindowTouchEnd);
 
   return () => {
-    document.body.removeChild(joystickContainer);
+    joystickContainer.remove();
     window.removeEventListener('mousemove', handleWindowMouseMove);
     window.removeEventListener('mouseup', handleWindowMouseUp);
     window.removeEventListener('touchmove', handleWindowTouchMove);
@@ -143,12 +146,12 @@ export const createJoystick = () => {
   };
 };
 
-export const createJumpButton = () => {
+export const createJumpButton = (parent: HTMLElement) => {
   if (!hasTouch) return () => {};
 
-  const jumpSize = Math.round(controlSize * 0.85);
+  const jumpSize = Math.round(controlSizeFor(parent) * 0.85);
   const container = document.createElement('div');
-  container.style.position = 'fixed';
+  container.style.position = 'absolute';
   container.style.bottom = '20px';
   container.style.right = '20px';
   container.style.width = `${jumpSize}px`;
@@ -179,11 +182,11 @@ export const createJumpButton = () => {
   knob.textContent = '↑';
 
   container.appendChild(knob);
-  document.body.appendChild(container);
+  parent.appendChild(container);
 
   const press = () => {
     knob.style.backgroundColor = 'rgba(140, 140, 140, 0.9)';
-    if (window.triggerJump) window.triggerJump();
+    controlBus.jump?.();
   };
 
   const release = () => {
@@ -204,7 +207,7 @@ export const createJumpButton = () => {
   window.addEventListener('touchcancel', handleTouchEnd);
 
   return () => {
-    document.body.removeChild(container);
+    container.remove();
     window.removeEventListener('mouseup', handleMouseUp);
     window.removeEventListener('touchend', handleTouchEnd);
     window.removeEventListener('touchcancel', handleTouchEnd);

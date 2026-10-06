@@ -22,6 +22,37 @@ npm run preview  # serve the production build
 npm run lint
 ```
 
+## Using it in another site
+
+The scene is also a package. `npm run build:lib` bundles `src/lib/index.ts` into `dist/` (React, three and the R3F packages are peer dependencies). Install it from git (it builds on install through `prepare`), or use `npm link` while developing.
+
+```tsx
+import { lazy, Suspense } from 'react';
+const PipWalk = lazy(() => import('pip-walk').then((m) => ({ default: m.PipWalk })));
+
+// The component fills its parent, so give the parent a size
+<div style={{ height: '100vh' }}>
+  <Suspense fallback={null}>
+    <PipWalk assetBase="/pip-walk/" />
+  </Suspense>
+</div>
+```
+
+The model, textures and environment map are not bundled. Copy `node_modules/pip-walk/public/*` into the host's `public/pip-walk/` and pass that folder as `assetBase` (default `/`).
+
+| Prop | Default | Purpose |
+| --- | --- | --- |
+| `assetBase` | `/` | Folder the assets are served from |
+| `controls` | `'auto'` | `'none'` hides the on-screen joystick and jump button |
+| `paused` | `false` | Stops rendering and ignores input while the scene stays mounted |
+| `showStartButton` | `true` | Shows a Start button over the scene (click or Enter once loaded); it loads in the background and input (including the touch controls) is ignored until Start is clicked |
+| `onReady` | | Called once the scene has loaded and rendered its first frames |
+| `onStart` | | Called when Start is clicked |
+| `showFps` | `false` in the package | FPS readout |
+| `className`, `style` | | Applied to the wrapper |
+
+Set `resolve.dedupe: ['three', 'react', 'react-dom']` in the host's Vite config so there is only one copy of three.
+
 ## Controls
 
 | Action | Keyboard / mouse | Touch |
@@ -36,14 +67,16 @@ The dog sits after about 10 seconds of standing still. Clicking it while it stan
 
 ```
 src/
-  main.tsx                 Entry point
-  App.tsx                  Mounts the scene and the touch controls
+  main.tsx                 Dev app entry point
+  App.tsx                  Dev app: the scene filling the window
+  lib/index.ts             Package entry (exports PipWalk)
   components/
     Scene.tsx              Canvas, lights, fog, sky, post-processing
     ModelController.tsx    Dog model: input, movement, animation state machine, shadow light
     Grass.tsx              Instanced grass field and its shaders
     Ground.tsx             Ground plane
     CameraController.tsx   Camera position and FOV
+    StartScreen.tsx        Start button shown over the scene until it's clicked
     ButtonOverlay.tsx      On-screen joystick and jump button (touch devices)
     FpsCounter.tsx         FPS readout (dev builds only)
     modelConfig.ts         Animation names, tuning values, sun position, fog distances

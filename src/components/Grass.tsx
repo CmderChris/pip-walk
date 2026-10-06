@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
-import { useFrame } from '@react-three/fiber';
+import { useFrame, useThree } from '@react-three/fiber';
 import { grassDensityTier } from './perfTier';
 import { modelWorldPos, modelSitAmountRef, modelForwardRef, modelPawPositions, modelGroundedRef, cameraFocus, cameraRig } from './modelState';
 import { SUN_POSITION, FOG_FAR } from './modelConfig';
@@ -440,6 +440,7 @@ function updateTile(mesh: THREE.Object3D, t: TileMesh, limits: ViewLimits) {
 const Grass = () => {
   const timeRef = useRef(0);
   const limitsRef = useRef<ViewLimits>({ ahead: 0, rear: 0, tanHalfH: 0, camZ: 0 });
+  const size = useThree((state) => state.size);
   const lastAspectRef = useRef(-1);
   const lastZOffsetRef = useRef(-1);
 
@@ -566,7 +567,7 @@ const Grass = () => {
 
   // Place and cull tiles before the first frame so none flash at the origin
   useLayoutEffect(() => {
-    refreshLimits(window.innerWidth / Math.max(1, window.innerHeight));
+    refreshLimits(size.width / Math.max(1, size.height));
     tiles.forEach((t, i) => {
       const node = meshRefs.current[i];
       if (node) updateTile(node, t, limitsRef.current);
