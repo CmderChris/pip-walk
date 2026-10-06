@@ -1,26 +1,41 @@
 import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { useFrame } from '@react-three/fiber';
-import { isLowEnd } from './perfTier';
-import { modelWorldPos, modelSitAmountRef, modelForwardRef, modelPawPositions, modelGroundedRef } from './modelState';
+import { grassDensityTier } from './perfTier';
+import { modelWorldPos, modelSitAmountRef, modelForwardRef, modelPawPositions, modelGroundedRef, cameraFocus, cameraRig } from './modelState';
 import { SUN_POSITION, FOG_FAR } from './modelConfig';
+import { curveDropGLSL, curveUniforms } from './worldCurve';
+import { computeViewLimits, type ViewLimits } from './viewLimits';
+import { WIND_DIR, GUST_WIDTH, GUST_LEAN, IDLE_WIND_AMP, windState, updateWind } from './wind';
+import { qualityScale, updateAdaptiveQuality } from './adaptiveQuality';
 
 const PLAYER_RADIUS = 0.35;
 
-// Just past the fog's far distance, so nothing renders where it can't be seen.
-const FIELD_RADIUS = FOG_FAR + 20;
+// Fog hides everything beyond FOG_FAR from the camera, and the curved horizon hides the
+// ground ahead at ~50 units, so the field only has to reach as far as the sides of the view.
+const FIELD_RADIUS = FOG_FAR - 5;
 
-// Six distance bands with falling density, each split into `wedges` angular tiles.
-// Every tile is its own InstancedMesh, so three.js can frustum-cull the ones out
-// of view; a single full-ring mesh always straddles the view and is never culled.
+// Two distance bands around the camera focus: a dense inner disc and a sparser ring out
+// to FIELD_RADIUS. `clusters` is the count at full density over the band's own area;
+// grassDensityTier scales it for the device, and adaptiveQuality thins it further live.
+// Only the inner band tracks the dog's paws.
+//
+// The world scrolls forever, so each band is a periodic grid of TILES_PER_SIDE² small
+// meshes. Each frame every tile moves to its periodic image nearest the camera focus.
+// Tiles (and, in the vertex shader, individual blades) the camera can't see are skipped.
 const BANDS = [
-  { r:  50, planes: 3, clusters: isLowEnd ?  4_500 : 16_000, perC: 14, cR: 0.5,  w: 0.52, hs: 1.0, wedges:  6, near: true  },
-  { r:  90, planes: 3, clusters: isLowEnd ?  2_800 :  9_000, perC: 12, cR: 0.7,  w: 0.52, hs: 1.0, wedges:  8, near: true  },
-  { r: 140, planes: 3, clusters: isLowEnd ?  3_000 : 10_000, perC:  8, cR: 1.0,  w: 0.52, hs: 1.0, wedges:  8, near: false },
-  { r: 200, planes: 2, clusters: isLowEnd ?  6_000 : 22_000, perC:  6, cR: 1.4,  w: 0.6,  hs: 1.0, wedges: 10, near: false },
-  { r: 300, planes: 2, clusters: isLowEnd ?  6_000 : 20_000, perC:  4, cR: 3.0,  w: 0.8,  hs: 1.2, wedges: 12, near: false },
-  { r: FIELD_RADIUS, planes: 2, clusters: isLowEnd ? 2_400 : 7_700, perC: 3, cR: 6.0, w: 1.2, hs: 1.8, wedges: 12, near: false },
+  { r:              50, planes: 3, clusters: Math.round(16_000 * grassDensityTier), perC: 14, cR: 0.5, w: 0.52, hs: 1.0, paws: true  },
+  { r: FIELD_RADIUS, planes: 3, clusters: Math.round( 5_000 * grassDensityTier), perC: 12, cR: 0.7, w: 0.52, hs: 1.0, paws: false },
 ];
+
+// A tile jumps by one period when its centre passes period/2 from the focus. With
+// period = 2r + tileSize its nearest edge is then already r away, so the jump is
+// never seen. That fixes tileSize = 2r / (TILES_PER_SIDE - 1).
+const TILES_PER_SIDE = 8;
+
+// Blades shrink to nothing over this distance at each band edge, cross-fading
+// the bands (and hiding the boundary as it sweeps across the world).
+const BAND_FADE = 10;
 
 // ─── Grass blade alpha texture ────────────────────────────────────────────────
 // Blade alpha: thin point at the base, widest about a third up, tapering to a tip.
@@ -63,36 +78,41 @@ function makeGrassAlphaTexture(size = 512): THREE.CanvasTexture {
   return tex;
 }
 
-// ─── Noise texture (colour variation only; wind uses GLSL noise) ──────────────
+// ─── Noise texture (colour variation only) ────────────────────────────────────
+// Tileable: lattice coordinates wrap at `period`, so RepeatWrapping has no seam
+// and the colour patches continue however far the world scrolls.
 function makeNoiseTexture(size = 256): THREE.DataTexture {
   function hash(x: number, y: number) {
     const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
     return n - Math.floor(n);
   }
   function smooth(t: number) { return t * t * (3 - 2 * t); }
-  function vnoise(x: number, y: number) {
+  function vnoise(x: number, y: number, period: number) {
     const ix = Math.floor(x), iy = Math.floor(y);
     const fx = smooth(x - ix), fy = smooth(y - iy);
+    const x0 = ((ix % period) + period) % period, x1 = (x0 + 1) % period;
+    const y0 = ((iy % period) + period) % period, y1 = (y0 + 1) % period;
     return (
-      hash(ix,     iy)     * (1 - fx) * (1 - fy) +
-      hash(ix + 1, iy)     *      fx  * (1 - fy) +
-      hash(ix,     iy + 1) * (1 - fx) *      fy  +
-      hash(ix + 1, iy + 1) *      fx  *      fy
+      hash(x0, y0) * (1 - fx) * (1 - fy) +
+      hash(x1, y0) *      fx  * (1 - fy) +
+      hash(x0, y1) * (1 - fx) *      fy  +
+      hash(x1, y1) *      fx  *      fy
     );
   }
   const data = new Uint8Array(size * size * 4);
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
+      // Octave frequencies are whole numbers (4, 8, 16 cells) so each tiles exactly
       const nx = (x / size) * 4, ny = (y / size) * 4;
-      let v = vnoise(nx, ny) * 0.5 + vnoise(nx * 2.1, ny * 2.1) * 0.25 + vnoise(nx * 4.3, ny * 4.3) * 0.125;
+      let v = vnoise(nx, ny, 4) * 0.5 + vnoise(nx * 2, ny * 2, 8) * 0.25 + vnoise(nx * 4, ny * 4, 16) * 0.125;
       v = Math.min(v / 0.875, 1);
       const b = Math.floor(v * 255), i = (y * size + x) * 4;
       data[i] = b; data[i+1] = b; data[i+2] = b; data[i+3] = 255;
     }
   }
   const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
-  // ClampToEdge avoids seams; LinearFilter because DataTexture defaults to Nearest.
-  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+  // Repeat (the noise tiles); LinearFilter because DataTexture defaults to Nearest.
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   tex.magFilter = tex.minFilter = THREE.LinearFilter;
   tex.needsUpdate = true;
   return tex;
@@ -115,88 +135,80 @@ function createTuftGeometry(numPlanes: number, width = 0.52, height = 1.0): THRE
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   geo.setAttribute('uv',       new THREE.Float32BufferAttribute(uvs,       2));
   geo.setIndex(indices);
-  geo.computeVertexNormals();
   return geo;
 }
 
-// ─── Clustered placement (annulus candidates, split into angular wedges) ──────
-const _dummy = new THREE.Object3D();
+// ─── Clustered placement (periodic square tiles, packed instance data) ────────
 
-// Jittered grid of cluster-centre candidates across a circular annulus.
-function generateAnnulusCandidates(outerR: number, innerR: number, targetClusters: number): [number, number][] {
-  const outerSq  = outerR * 2;
-  const gridStep = Math.sqrt(outerSq * outerSq / (targetClusters * 3));
-  const cols     = Math.ceil(outerSq / gridStep);
-  const rows     = Math.ceil(outerSq / gridStep);
-  const sx       = outerSq / cols, sz = outerSq / rows;
-
-  const candidates: [number, number][] = [];
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      const cx = -outerR + (c + 0.1 + Math.random() * 0.8) * sx;
-      const cz = -outerR + (r + 0.1 + Math.random() * 0.8) * sz;
-      const d2 = cx * cx + cz * cz;
-      // Both inner AND outer bounds are circular — no square corners
-      if (d2 < innerR * innerR) continue;
-      if (d2 > outerR * outerR) continue;
-      candidates.push([cx, cz]);
-    }
+// `count` cluster centres over a size×size tile centred on the origin: a jittered
+// grid with a random subset of its cells, for even coverage. The order is random, so
+// any prefix of the tile's blades is also an even (thinner) scatter; adaptiveQuality
+// relies on that.
+function generateTileClusters(size: number, count: number): [number, number][] {
+  const g    = Math.max(1, Math.ceil(Math.sqrt(count)));
+  const cell = size / g;
+  const order = Array.from({ length: g * g }, (_, i) => i);
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = order[i]; order[i] = order[j]; order[j] = tmp;
   }
-  return candidates;
+  const centres: [number, number][] = [];
+  for (let k = 0; k < count; k++) {
+    const col = order[k] % g, row = Math.floor(order[k] / g);
+    centres.push([
+      -size / 2 + (col + 0.1 + Math.random() * 0.8) * cell,
+      -size / 2 + (row + 0.1 + Math.random() * 0.8) * cell,
+    ]);
+  }
+  return centres;
 }
 
-// Splits candidates into angular wedges and shuffles each, so a per-wedge
-// budget isn't biased by scan order.
-function splitIntoWedges(candidates: [number, number][], wedgeCount: number): [number, number][][] {
-  const wedges: [number, number][][] = Array.from({ length: wedgeCount }, () => []);
-  for (const [cx, cz] of candidates) {
-    const angle = Math.atan2(cz, cx) + Math.PI; // 0..2π
-    const idx   = Math.min(wedgeCount - 1, Math.floor((angle / (Math.PI * 2)) * wedgeCount));
-    wedges[idx].push([cx, cz]);
-  }
-  for (const group of wedges) {
-    for (let i = group.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      const tmp = group[i]; group[i] = group[j]; group[j] = tmp;
-    }
-  }
-  return wedges;
-}
-
-// Scatters `perCluster` jittered blades around each cluster centre.
-function fillWedge(
-  node: THREE.InstancedMesh,
+// Scatters `perCluster` jittered blades around each cluster centre. Each blade is
+// 5 floats instead of a 16-float matrix: aInst = (x, z, yaw, width scale) relative to
+// the tile centre, aHeight = blade height.
+function fillTile(
+  inst: Float32Array,
+  height: Float32Array,
   centres: [number, number][],
   perCluster: number,
   clusterRadius: number,
   heightScale: number,
 ) {
-  let idx = 0;
+  let i = 0;
   for (const [cx, cz] of centres) {
     for (let t = 0; t < perCluster; t++) {
       const angle = Math.random() * Math.PI * 2;
       const dist  = Math.sqrt(Math.random()) * clusterRadius;
-      const sy    = (0.13 + Math.random() * 0.10) * heightScale;
-      const scale = 0.7  + Math.random() * 0.4;
-      _dummy.position.set(cx + Math.cos(angle) * dist, 0, cz + Math.sin(angle) * dist);
-      _dummy.rotation.set(0, Math.random() * Math.PI * 2, 0);
-      _dummy.scale.set(scale, sy, scale);
-      _dummy.updateMatrix();
-      node.setMatrixAt(idx++, _dummy.matrix);
+      inst[i * 4]     = cx + Math.cos(angle) * dist;
+      inst[i * 4 + 1] = cz + Math.sin(angle) * dist;
+      inst[i * 4 + 2] = Math.random() * Math.PI * 2;
+      inst[i * 4 + 3] = 0.7 + Math.random() * 0.4;
+      height[i]       = (0.13 + Math.random() * 0.10) * heightScale;
+      i++;
     }
   }
-  node.instanceMatrix.needsUpdate = true;
 }
 
 // ─── Shaders ──────────────────────────────────────────────────────────────────
-// Wind uses procedural GLSL noise, so it never tiles. The noise texture only
-// drives slow colour variation in the fragment shader.
 
 const vertexShader = /* glsl */`
   #include <fog_pars_vertex>
+  ${curveDropGLSL}
 
+  const vec2  WIND_DIR   = vec2(${WIND_DIR.x.toFixed(6)}, ${WIND_DIR.y.toFixed(6)});
+  const float GUST_WIDTH = ${GUST_WIDTH.toFixed(1)};
+  const float GUST_LEAN  = ${GUST_LEAN.toFixed(3)};
+
+  uniform vec2  uBandRange;      // this band's (inner, outer) distance from the camera focus
+  // What the camera can see, relative to the focus: x = horizon distance ahead,
+  // y = distance behind that the screen's bottom edge reaches, z = tan(half horizontal fov),
+  // w = how far behind the focus the camera sits
+  uniform vec4  uViewCull;
+  uniform float uCullFar;        // radial distance from the camera past which everything is fog
   uniform float uTime;
-  uniform float uWindAmp;
+  uniform float uIdleAmp;        // sway between gusts (0 = none)
+  uniform float uGustFront;      // gust position along WIND_DIR, in world units
+  uniform float uGustAmp;        // 1 while a gust is crossing the world, else 0
   uniform vec3  uPlayerPos;
   uniform float uPlayerRadius;
   uniform float uSitAmount;
@@ -206,63 +218,83 @@ const vertexShader = /* glsl */`
   uniform vec3  uPawPositions[2];
 #endif
 
+  attribute vec4  aInst;         // x, z, yaw, width scale — relative to the tile
+  attribute float aHeight;
+
   varying vec2  vUv;
   varying vec2  vWorldXZ;
 
-  // Procedural value noise (no texture, no tiling)
-  float hash21(vec2 p) {
-    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-  }
-  float vnoise(vec2 p) {
-    vec2 i = floor(p), f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    return mix(mix(hash21(i), hash21(i + vec2(1,0)), f.x),
-               mix(hash21(i + vec2(0,1)), hash21(i + vec2(1,1)), f.x), f.y);
-  }
-  float fbm(vec2 p) {
-    return vnoise(p) * 0.5 + vnoise(p * 2.1) * 0.25 + vnoise(p * 4.3) * 0.125;
-  }
-
   void main() {
-    vec4 modelPos = modelMatrix * instanceMatrix * vec4(position, 1.0);
+    // Rebuild the blade's transform from its packed instance data
+    float cs = cos(aInst.z), sn = sin(aInst.z);
+    vec3 local = vec3(position.x * aInst.w, position.y * aHeight, position.z * aInst.w);
+    vec3 p = vec3(cs * local.x + sn * local.z, local.y, -sn * local.x + cs * local.z);
+    p.xz += aInst.xy;
+
+    vec4 modelPos = modelMatrix * vec4(p, 1.0);
     vWorldXZ = modelPos.xz;
+
+    // View cull: skip blades the camera can't see — past the curved horizon, below the
+    // bottom of the screen, outside the side planes, or lost in fog.
+    vec2  rel      = modelPos.xz - uCurveFocus;
+    float camDepth = uViewCull.w - rel.y;
+    if (rel.y < -uViewCull.x || rel.y > uViewCull.y
+        || abs(rel.x) > (camDepth + 1.0) * uViewCull.z + 3.0
+        || length(vec2(rel.x, rel.y - uViewCull.w)) > uCullFar) {
+      gl_Position = vec4(2.0, 2.0, 2.0, 1.0); // outside clip space: culled
+      return;
+    }
+
+    // Band mask: tiles are periodic images, so each blade is shown only inside this
+    // band's distance range from the camera focus. Heights fade over BAND_FADE at
+    // both edges to cross-fade neighbouring bands. The innermost band has no inner edge.
+    float focusDist = length(rel);
+    bool  hasInner  = uBandRange.x > 0.0;
+    if (focusDist >= uBandRange.y || (hasInner && focusDist <= uBandRange.x - ${BAND_FADE.toFixed(1)})) {
+      gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+      return;
+    }
+    float bandFade = 1.0 - smoothstep(uBandRange.y - ${BAND_FADE.toFixed(1)}, uBandRange.y, focusDist);
+    if (hasInner) bandFade *= smoothstep(uBandRange.x - ${BAND_FADE.toFixed(1)}, uBandRange.x, focusDist);
+    modelPos.y *= bandFade;
+
     float originalY = modelPos.y; // pre-wind blade height — used for sit rotation
 
-    // Player distance, used by wind suppression and push
+    // Player distance, used by the wind suppression and push
     vec2  diff = modelPos.xz - uPlayerPos.xz;
     float dist = length(diff);
 
-    // Wind suppression ellipse (always computed; the sit/paw zones need it too)
-    vec2  windDir  = normalize(vec2(1.0, 0.5));
-    float wsAlong  = dot(diff, uPlayerForward);
-    float wsAcross = dot(diff, vec2(-uPlayerForward.y, uPlayerForward.x));
-    float wsLen    = wsAlong < 0.0
-                       ? mix(uPlayerRadius * 2.0, 1.2, uSitAmount)
-                       : mix(uPlayerRadius * 2.0, 0.7, uSitAmount);
-    float wsSide   = mix(uPlayerRadius * 2.0, 0.6, uSitAmount);
-    float wsEll    = length(vec2(wsAcross / wsSide, wsAlong / wsLen));
-    float windSuppress = mix(1.0, smoothstep(0.8, 1.0, wsEll), uSitAmount);
-
+    // ── Wind: a gust front crossing the world (plus optional faint idle sway) ──────
+    // Skipped for every blade the front isn't over, so calm periods cost nothing.
+    float windAlong = dot(WIND_DIR, modelPos.xz);
+    float gustD     = (windAlong - uGustFront) / GUST_WIDTH;
+    float gustEnv   = uGustAmp > 0.0 ? exp(-gustD * gustD) : 0.0;
+    if (gustEnv > 0.01 || uIdleAmp > 0.0) {
+      // Calm around the dog: the body ellipse (stronger when sitting), then each front paw
+      float wsAlong  = dot(diff, uPlayerForward);
+      float wsAcross = dot(diff, vec2(-uPlayerForward.y, uPlayerForward.x));
+      float wsLen    = wsAlong < 0.0
+                         ? mix(uPlayerRadius * 2.0, 1.2, uSitAmount)
+                         : mix(uPlayerRadius * 2.0, 0.7, uSitAmount);
+      float wsSide   = mix(uPlayerRadius * 2.0, 0.6, uSitAmount);
+      float wsEll    = length(vec2(wsAcross / wsSide, wsAlong / wsLen));
+      float windSuppress = mix(1.0, smoothstep(0.8, 1.0, wsEll), uSitAmount);
 #ifdef PAW_TRACKING
-    // Per-paw suppression — keeps grass near each leg still (skips when sitting/airborne)
-    if (uSitAmount < 0.99) {
-      for (int i = 0; i < 2; i++) {
-        vec2  pd    = modelPos.xz - uPawPositions[i].xz;
-        float pDist = length(pd);
-        windSuppress = min(windSuppress, mix(1.0, smoothstep(0.0, 0.28, pDist), uGroundedAmount));
+      if (uSitAmount < 0.99) {
+        for (int i = 0; i < 2; i++) {
+          float pDist = length(modelPos.xz - uPawPositions[i].xz);
+          windSuppress = min(windSuppress, mix(1.0, smoothstep(0.0, 0.28, pDist), uGroundedAmount));
+        }
       }
+#endif
+      // Lean along the wind with a little per-blade flutter; the tip droops as it bends
+      float flutter = sin(uTime * 5.0 + windAlong * 0.6 + aInst.z * 2.0);
+      float sway    = (gustEnv * GUST_LEAN * (0.75 + 0.25 * flutter)
+                       + uIdleAmp * sin(uTime * 0.9 + windAlong * 0.35))
+                      * uv.y * windSuppress;
+      modelPos.xz += WIND_DIR * sway;
+      modelPos.y  -= abs(sway) * 0.4;
     }
-#endif
-
-#ifdef ANIMATED
-    // Wind: rolling sin wave + procedural turbulence
-    float turbulence = fbm(modelPos.xz * 0.05 - uTime * 0.12 * windDir);
-    float sway       = sin(0.35 * dot(windDir, modelPos.xz) + turbulence * 5.0 + uTime)
-                       * uWindAmp * uv.y * windSuppress;
-    modelPos.x += sway * windDir.x;
-    modelPos.z += sway * windDir.y;
-    modelPos.y += (turbulence - 0.5) * 0.08 * uv.y * windSuppress;
-#endif
 
     // ── Walking push: gentle circular lean (fades out while airborne) ──────
     float walkFactor = (1.0 - smoothstep(0.0, uPlayerRadius, dist)) * (1.0 - uSitAmount) * uGroundedAmount;
@@ -292,6 +324,9 @@ const vertexShader = /* glsl */`
     modelPos.xz    += normalize(diff + vec2(0.001)) * sitFactor * originalY;
     modelPos.y      = mix(modelPos.y, 0.0, sitFactor);
 
+    // Follow the curved ground (same drop as Ground.tsx, from the blade's base position)
+    modelPos.y -= curveDrop(vWorldXZ);
+
     vUv = uv;
     vec4 mvPosition = viewMatrix * modelPos;
     gl_Position = projectionMatrix * mvPosition;
@@ -319,8 +354,8 @@ const fragmentShader = /* glsl */`
     float alpha = texture2D(uGrassAlpha, vUv).r;
     if (alpha < 0.08) discard;
 
-    // Colour variation sampled at low frequency (~200-unit patches).
-    vec2 colorUV = vWorldXZ / 400.0 + 0.5;
+    // Colour variation sampled at low frequency (~150-unit patches).
+    vec2 colorUV = vWorldXZ / 150.0;
     vec3 tipColor = mix(uTipColor1, uTipColor2,
                         texture2D(uNoiseTexture, colorUV).r);
     vec3 col = mix(uBaseColor, tipColor, vUv.y);
@@ -360,33 +395,67 @@ const fragmentShader = /* glsl */`
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-// Shadow direction = normalize(modelXZ - lightXZ), updated only when model moves.
-const _lightXZ    = new THREE.Vector2(SUN_POSITION.x, SUN_POSITION.z);
-const _shadowDir  = new THREE.Vector2();
+// Shadow direction = normalize(modelXZ - lightXZ). The sun sits at a fixed offset
+// from the camera focus (as in ModelController), so it's recomputed when either moves.
+const _lightXZ     = new THREE.Vector2();
+const _shadowDir   = new THREE.Vector2();
 const _prevModelXZ = new THREE.Vector2(9999, 9999);
+const _prevFocus   = new THREE.Vector2(9999, 9999);
 const MOVE_EPS = 0.0001;
 
-type WedgeMesh = {
-  geometry: THREE.BufferGeometry;
+type TileMesh = {
+  geometry: THREE.InstancedBufferGeometry;
   material: THREE.ShaderMaterial;
-  count: number;
-  centres: [number, number][];
-  perCluster: number;
-  clusterRadius: number;
-  heightScale: number;
+  count: number;   // blades at full density; instanceCount is this × qualityScale
+  cx: number;      // tile centre within the periodic grid
+  cz: number;
+  period: number;  // grid period (TILES_PER_SIDE tiles)
+  radius: number;  // XZ radius covering the tile and its blades
+  innerR: number;  // band range
+  outerR: number;
 };
+
+// Moves a tile to its periodic image nearest the camera focus, and hides it if no
+// part of it can be on screen or in its band.
+function updateTile(mesh: THREE.Object3D, t: TileMesh, limits: ViewLimits) {
+  const x = t.cx + t.period * Math.round((cameraFocus.x - t.cx) / t.period);
+  const z = t.cz + t.period * Math.round((cameraFocus.y - t.cz) / t.period);
+  mesh.position.set(x, 0, z);
+
+  const relX = x - cameraFocus.x;
+  const relZ = z - cameraFocus.y;
+  const dist = Math.hypot(relX, relZ);
+  // Depth (in front of the camera) of the tile's far edge: the widest the view gets over it
+  const farDepth = Math.min(limits.camZ - (relZ - t.radius), limits.camZ + limits.ahead);
+
+  mesh.visible =
+    dist - t.radius <= t.outerR &&
+    dist + t.radius >= t.innerR - BAND_FADE &&
+    relZ + t.radius >= -limits.ahead &&
+    relZ - t.radius <= limits.rear &&
+    Math.abs(relX) - t.radius <= (farDepth + 1) * limits.tanHalfH + 3 &&
+    Math.hypot(relX, relZ - limits.camZ) - t.radius <= FOG_FAR;
+}
 
 const Grass = () => {
   const timeRef = useRef(0);
+  const limitsRef = useRef<ViewLimits>({ ahead: 0, rear: 0, tanHalfH: 0, camZ: 0 });
+  const lastAspectRef = useRef(-1);
+  const lastZOffsetRef = useRef(-1);
 
-  const { wedgeMeshes, nearMaterial, disposables } = useMemo(() => {
+  const { tiles, uniforms, disposables } = useMemo(() => {
     const alphaTexture = makeGrassAlphaTexture(512);
     const noiseTexture = makeNoiseTexture(256);
 
-    // Both materials share these uniform objects, so updating one updates both.
+    // Every band's material shares these uniform objects, so updating one updates all.
     const sharedUniforms = {
+      ...curveUniforms,
       uTime:          { value: 0 },
-      uWindAmp:       { value: 0.08 },
+      uIdleAmp:       { value: IDLE_WIND_AMP },
+      uGustFront:     { value: 0 },
+      uGustAmp:       { value: 0 },
+      uViewCull:      { value: new THREE.Vector4() },
+      uCullFar:       { value: FOG_FAR },
       uGrassAlpha:    { value: alphaTexture },
       uNoiseTexture:  { value: noiseTexture },
       // original ground-match green: #2e4414
@@ -400,6 +469,11 @@ const Grass = () => {
       uShadowDir:     { value: new THREE.Vector2(0, 1) },
       uPlayerForward: { value: new THREE.Vector2(0, 1) },
       uSunPosition:   { value: SUN_POSITION.clone() },
+      // Only read by materials with PAW_TRACKING
+      uPawPositions:  { value: [
+        new THREE.Vector3(9999, 0, 9999),
+        new THREE.Vector3(9999, 0, 9999),
+      ]},
     };
 
     // fog: true has the renderer fill the fog uniforms from Scene's <fog>. They're
@@ -410,97 +484,138 @@ const Grass = () => {
       ...extra,
     });
 
-    const matBase = {
+    // One material per band (each has its own distance range)
+    const makeMaterial = (band: typeof BANDS[number], innerR: number) => new THREE.ShaderMaterial({
       vertexShader,
       fragmentShader,
-      side: THREE.DoubleSide as THREE.Side,
+      side: THREE.DoubleSide,
       transparent: false,
       depthWrite:  true,
       fog: true,
-    };
-
-    // Near bands (0–1): full paw tracking + animation via PAW_TRACKING/ANIMATED defines
-    const nearMaterial = new THREE.ShaderMaterial({
-      ...matBase,
-      uniforms: makeUniforms({
-        uPawPositions: { value: [
-          new THREE.Vector3(9999, 0, 9999),
-          new THREE.Vector3(9999, 0, 9999),
-        ]},
-      }),
-      defines: { PAW_TRACKING: '', ANIMATED: '' },
+      uniforms: makeUniforms({ uBandRange: { value: new THREE.Vector2(innerR, band.r) } }),
+      defines: band.paws ? { PAW_TRACKING: '' } : {},
     });
 
-    // Far bands: no paw tracking or animation — saves shader cost
-    const farMaterial = new THREE.ShaderMaterial({
-      ...matBase,
-      uniforms: makeUniforms(),
-    });
-
-    // One shared geometry per band, one InstancedMesh per wedge.
-    const wedgeMeshes: WedgeMesh[] = [];
+    // One tuft geometry and material per band, one instanced mesh per tile.
+    const tiles: TileMesh[] = [];
+    const baseGeometries: THREE.BufferGeometry[] = [];
+    const materials: THREE.ShaderMaterial[] = [];
     let prevR = 0;
     for (const band of BANDS) {
-      const geometry = createTuftGeometry(band.planes, band.w);
-      const material = band.near ? nearMaterial : farMaterial;
-      const candidates = generateAnnulusCandidates(band.r, prevR, band.clusters);
-      const wedgeGroups = splitIntoWedges(candidates, band.wedges);
-      const perWedgeTarget = Math.ceil(band.clusters / band.wedges);
+      const base = createTuftGeometry(band.planes, band.w);
+      baseGeometries.push(base);
+      const material = makeMaterial(band, prevR);
+      materials.push(material);
 
-      for (const group of wedgeGroups) {
-        const centres = group.slice(0, perWedgeTarget);
-        if (centres.length === 0) continue;
-        wedgeMeshes.push({
-          geometry,
-          material,
-          count: centres.length * band.perC,
-          centres,
-          perCluster: band.perC,
-          clusterRadius: band.cR,
-          heightScale: band.hs,
-        });
+      const tileSize = (2 * band.r) / (TILES_PER_SIDE - 1);
+      const period   = tileSize * TILES_PER_SIDE;
+      const density  = band.clusters / (Math.PI * (band.r * band.r - prevR * prevR));
+      const perTile  = Math.max(1, Math.round(density * tileSize * tileSize));
+      const count    = perTile * band.perC;
+      const radius   = tileSize * Math.SQRT1_2 + band.cR + 1;
+
+      for (let row = 0; row < TILES_PER_SIDE; row++) {
+        for (let col = 0; col < TILES_PER_SIDE; col++) {
+          const inst   = new Float32Array(count * 4);
+          const height = new Float32Array(count);
+          fillTile(inst, height, generateTileClusters(tileSize, perTile), band.perC, band.cR, band.hs);
+
+          // Shares the tuft's vertices; only the per-blade attributes are per tile
+          const geometry = new THREE.InstancedBufferGeometry();
+          geometry.setIndex(base.index);
+          geometry.setAttribute('position', base.getAttribute('position'));
+          geometry.setAttribute('uv', base.getAttribute('uv'));
+          geometry.setAttribute('aInst', new THREE.InstancedBufferAttribute(inst, 4));
+          geometry.setAttribute('aHeight', new THREE.InstancedBufferAttribute(height, 1));
+          geometry.instanceCount = count;
+          // Set by hand: three would compute it from the single tuft, not the whole tile
+          geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), radius);
+
+          tiles.push({
+            geometry, material, count, period, radius,
+            cx: -period / 2 + (col + 0.5) * tileSize,
+            cz: -period / 2 + (row + 0.5) * tileSize,
+            innerR: prevR,
+            outerR: band.r,
+          });
+        }
       }
       prevR = band.r;
     }
 
     const disposables = [
-      alphaTexture, noiseTexture, nearMaterial, farMaterial,
-      ...new Set(wedgeMeshes.map((wm) => wm.geometry)),
+      alphaTexture, noiseTexture, ...materials, ...baseGeometries,
+      ...tiles.map((t) => t.geometry),
     ];
 
-    return { wedgeMeshes, nearMaterial, disposables };
+    return { tiles, uniforms: sharedUniforms, disposables };
   }, []);
 
   useEffect(() => () => disposables.forEach((d) => d.dispose()), [disposables]);
 
-  // Scatter once the meshes exist. A layout effect (not an inline ref) keeps
-  // re-renders from re-randomising the field.
-  const meshRefs = useRef<(THREE.InstancedMesh | null)[]>([]);
+  const meshRefs = useRef<(THREE.Mesh | null)[]>([]);
+
+  // Computes what the camera can see; recomputed only when the aspect ratio or camera distance changes
+  const refreshLimits = (aspect: number) => {
+    if (aspect === lastAspectRef.current && cameraRig.zOffset === lastZOffsetRef.current) return;
+    lastAspectRef.current = aspect;
+    lastZOffsetRef.current = cameraRig.zOffset;
+    const l = computeViewLimits(aspect, limitsRef.current);
+    uniforms.uViewCull.value.set(l.ahead, l.rear, l.tanHalfH, l.camZ);
+  };
+
+  // Place and cull tiles before the first frame so none flash at the origin
   useLayoutEffect(() => {
-    wedgeMeshes.forEach((wm, i) => {
+    refreshLimits(window.innerWidth / Math.max(1, window.innerHeight));
+    tiles.forEach((t, i) => {
       const node = meshRefs.current[i];
-      if (node) fillWedge(node, wm.centres, wm.perCluster, wm.clusterRadius, wm.heightScale);
+      if (node) updateTile(node, t, limitsRef.current);
     });
-  }, [wedgeMeshes]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tiles]);
 
   const sitAmountRef = useRef(0);
 
-  useFrame((_, delta) => {
+  useFrame((state, delta) => {
     timeRef.current += delta;
-    // Uniform objects are shared, so updating nearMaterial updates farMaterial too.
-    nearMaterial.uniforms.uTime.value = timeRef.current;
-    // Only update position-dependent uniforms when the model has actually moved
+    uniforms.uTime.value = timeRef.current;
+
+    // Thin or restore the grass if the frame rate can't hold
+    if (updateAdaptiveQuality(delta)) {
+      if (import.meta.env.DEV) console.info('Grass density scale:', qualityScale.value.toFixed(2));
+      for (const t of tiles) {
+        t.geometry.instanceCount = Math.max(1, Math.floor(t.count * qualityScale.value));
+      }
+    }
+
+    // Gust front
+    updateWind(delta, cameraFocus.x, cameraFocus.y);
+    uniforms.uGustFront.value = windState.front;
+    uniforms.uGustAmp.value = windState.active ? 1 : 0;
+
+    // Tiles: nearest periodic image of each, hidden when unseen
+    refreshLimits((state.camera as THREE.PerspectiveCamera).aspect);
+    for (let i = 0; i < tiles.length; i++) {
+      const node = meshRefs.current[i];
+      if (node) updateTile(node, tiles[i], limitsRef.current);
+    }
+
+    const focusMoved = Math.abs(cameraFocus.x - _prevFocus.x) > MOVE_EPS
+      || Math.abs(cameraFocus.y - _prevFocus.y) > MOVE_EPS;
+    if (focusMoved) _prevFocus.copy(cameraFocus);
+
+    // Only update position-dependent uniforms when the model (or the sun) has moved
     const movedX = Math.abs(modelWorldPos.x - _prevModelXZ.x);
     const movedZ = Math.abs(modelWorldPos.z - _prevModelXZ.y);
-    if (movedX > MOVE_EPS || movedZ > MOVE_EPS) {
+    if (movedX > MOVE_EPS || movedZ > MOVE_EPS || focusMoved) {
       _prevModelXZ.set(modelWorldPos.x, modelWorldPos.z);
-      nearMaterial.uniforms.uPlayerPos.value.copy(modelWorldPos);
+      uniforms.uPlayerPos.value.copy(modelWorldPos);
+      _lightXZ.set(cameraFocus.x + SUN_POSITION.x, cameraFocus.y + SUN_POSITION.z);
       _shadowDir.set(modelWorldPos.x - _lightXZ.x, modelWorldPos.z - _lightXZ.y).normalize();
-      nearMaterial.uniforms.uShadowDir.value.copy(_shadowDir);
+      uniforms.uShadowDir.value.copy(_shadowDir);
     }
-    nearMaterial.uniforms.uPlayerForward.value.copy(modelForwardRef.value);
-    const pawUniforms = nearMaterial.uniforms.uPawPositions.value as THREE.Vector3[];
-    for (let i = 0; i < 2; i++) pawUniforms[i].copy(modelPawPositions[i]);
+    uniforms.uPlayerForward.value.copy(modelForwardRef.value);
+    for (let i = 0; i < 2; i++) uniforms.uPawPositions.value[i].copy(modelPawPositions[i]);
     // Ease into/out of sitting; snap when close so it stops updating
     const sitTarget = modelSitAmountRef.value;
     const sitDiff = sitTarget - sitAmountRef.current;
@@ -509,17 +624,18 @@ const Grass = () => {
     } else {
       sitAmountRef.current += sitDiff * Math.min(1, delta * 4);
     }
-    nearMaterial.uniforms.uSitAmount.value = sitAmountRef.current;
-    nearMaterial.uniforms.uGroundedAmount.value = modelGroundedRef.value;
+    uniforms.uSitAmount.value = sitAmountRef.current;
+    uniforms.uGroundedAmount.value = modelGroundedRef.value;
   });
 
   return (
     <>
-      {wedgeMeshes.map((wm, i) => (
-        <instancedMesh
+      {tiles.map((t, i) => (
+        <mesh
           key={i}
           ref={(node) => { meshRefs.current[i] = node; }}
-          args={[wm.geometry, wm.material, wm.count]}
+          geometry={t.geometry}
+          material={t.material}
         />
       ))}
     </>

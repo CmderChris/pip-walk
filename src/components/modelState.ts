@@ -1,5 +1,12 @@
 import * as THREE from 'three';
 
+// Ground point (x, z) the camera looks at. ModelController moves it to scroll the
+// world; the camera, curvature, grass tiling and ground tiling all follow it.
+export const cameraFocus = new THREE.Vector2(0, 0);
+
+// Camera offset from the focus. CameraController sets zOffset from the aspect ratio.
+export const cameraRig = { height: 3, zOffset: 16 };
+
 // Model world position: ModelController writes it each frame, Grass reads it.
 export const modelWorldPos = new THREE.Vector3();
 

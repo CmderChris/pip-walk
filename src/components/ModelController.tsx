@@ -10,14 +10,15 @@ import {
   JUMP_START_MOVE_ANIM, JUMP_AIR_MOVE_ANIM, JUMP_LAND_MOVE_ANIM,
   SIT_DELAY, BLEND_TIME, JUMP_BLEND_TIME,
   SIT_LOOP2_INTERVAL_MIN, SIT_LOOP2_INTERVAL_MAX,
-  MOVE_SPEED, MODEL_Y_OFFSET, ROTATION_SPEED, MIN_SPEED_FOR_WALK,
-  EDGE_MARGIN, PLAY_AREA_FAR_Z,
+  MOVE_SPEED, MODEL_Y_OFFSET, ROTATION_SPEED, MIN_SPEED_FOR_WALK, WALK_ANIM_SPEED_SCALE,
+  EDGE_MARGIN, PLAY_AREA_FAR_Z, DEAD_ZONE, START_NDC, DIRECTION_SMOOTHING,
   SUN_POSITION,
   type SitState,
 } from './modelConfig';
 import { setWeights, type AnimationActions } from './animationHelpers';
 
-import { modelWorldPos, modelSitAmountRef, modelForwardRef, modelPawPositions, modelGroundedRef } from './modelState';
+import { modelWorldPos, modelSitAmountRef, modelForwardRef, modelPawPositions, modelGroundedRef, cameraFocus, cameraRig } from './modelState';
+import { curveDrop } from './worldCurve';
 
 // Pre-allocated — never created per frame
 const _raycaster = new THREE.Raycaster();
@@ -63,12 +64,18 @@ const ModelController = () => {
   );
 
   // ── Movement refs ──────────────────────────────────────────────────────────
-  const ndcPosRef = useRef(new THREE.Vector2(0, -0.3));
+  const ndcPosRef = useRef(new THREE.Vector2(START_NDC.x, START_NDC.y));
   const worldPosRef = useRef(new THREE.Vector3(0, 0, 0));
   const positionInitializedRef = useRef(false);
   const currentSpeedRef = useRef(0);
   const targetRotationRef = useRef(0);
   const moveSpeedRef = useRef(0);
+  // Ground speed (world units/s) the walk clip was animated for; null if it couldn't be measured
+  const walkNaturalSpeedRef = useRef<number | null>(null);
+  // Current ground speed, used to scale the walk animation's playback rate
+  const groundSpeedRef = useRef(0);
+  const smoothDirRef = useRef(new THREE.Vector2());
+  const smoothDirValidRef = useRef(false);
   const landingSpeedRef = useRef(1);
 
   // ── Front paw bones (back paws are covered by the body sit zone) ──
@@ -182,6 +189,49 @@ const ModelController = () => {
     };
     jumpStartLiftCurveRef.current = buildLiftCurve(jumpStartClip);
     jumpStartMoveLiftCurveRef.current = buildLiftCurve(jumpStartMoveClip);
+
+    // The walk clip is in place, so measure the ground speed it was animated for: how
+    // fast the planted front feet slide backwards (world units/s at timeScale 1). The
+    // frame loop scales playback by actual speed / this, so the feet track the ground.
+    const measureWalkSpeed = (clip: THREE.AnimationClip): number | null => {
+      const feet = ['foot_fL_028', 'foot_fR_034']
+        .map((name) => scene.getObjectByName(name))
+        .filter((obj): obj is THREE.Object3D => !!obj);
+      if (feet.length === 0) return null;
+
+      scene.position.set(0, MODEL_Y_OFFSET, 0);
+      const tmpMixer = new THREE.AnimationMixer(scene);
+      tmpMixer.clipAction(clip).play();
+      const STEPS = 120;
+      const dt = clip.duration / STEPS;
+      const paths = feet.map(() => [] as THREE.Vector3[]);
+      for (let i = 0; i <= STEPS; i++) {
+        tmpMixer.setTime(i * dt);
+        scene.updateMatrixWorld(true);
+        feet.forEach((foot, k) => paths[k].push(foot.getWorldPosition(new THREE.Vector3())));
+      }
+      tmpMixer.stopAllAction();
+      tmpMixer.uncacheRoot(scene);
+
+      // Planted = the lowest fifth of the foot's height range. Median speed ignores
+      // the slow frames at heel strike / toe off.
+      const speeds: number[] = [];
+      for (const path of paths) {
+        const ys = path.map((p) => p.y);
+        const lowY = Math.min(...ys);
+        const plantedY = lowY + 0.2 * (Math.max(...ys) - lowY);
+        for (let i = 0; i < STEPS; i++) {
+          if (path[i].y <= plantedY && path[i + 1].y <= plantedY) {
+            speeds.push(Math.hypot(path[i + 1].x - path[i].x, path[i + 1].z - path[i].z) / dt);
+          }
+        }
+      }
+      if (speeds.length === 0) return null;
+      speeds.sort((x, y) => x - y);
+      return speeds[Math.floor(speeds.length / 2)];
+    };
+    walkNaturalSpeedRef.current = measureWalkSpeed(walkClip);
+    if (import.meta.env.DEV) console.info('Walk clip natural ground speed:', walkNaturalSpeedRef.current);
 
     const mixer = new THREE.AnimationMixer(scene);
 
@@ -406,8 +456,8 @@ const ModelController = () => {
     // 2–6. Position. The boundary projection, perspective probes and unproject
     // are skipped while the model is stationary.
     if (canMove || (isAirborne && hasJumpVelocity)) {
-      // NDC boundary for far edge (only needed for clamping)
-      _tempVec3.set(0, 0, PLAY_AREA_FAR_Z);
+      // NDC of the far limit: past it the view ray never meets the flat ground plane
+      _tempVec3.set(cameraFocus.x, 0, cameraFocus.y + PLAY_AREA_FAR_Z);
       _tempVec3.project(cam);
       const farNDCY = _tempVec3.y;
 
@@ -429,23 +479,57 @@ const ModelController = () => {
       _raycaster.ray.intersectPlane(_groundPlane, _probePoint);
       const worldPerNdcY = _probePoint.distanceTo(_groundPoint) / PROBE;
 
+      const prevNdcX = ndcPosRef.current.x;
+      const prevNdcY = ndcPosRef.current.y;
+
       if (canMove) {
         _inputVec2.normalize();
+        // Ease the direction so adding or dropping a key (e.g. left → up-left) bends
+        // the path, and the scroll speed, over a few frames instead of in one step.
+        // A standing start adopts the input directly (moveSpeedRef already ramps speed).
+        if (!smoothDirValidRef.current) {
+          smoothDirRef.current.copy(_inputVec2);
+          smoothDirValidRef.current = true;
+        } else {
+          smoothDirRef.current.lerp(_inputVec2, 1 - Math.exp(-DIRECTION_SMOOTHING * delta));
+        }
+        const dir = smoothDirRef.current;
         moveSpeedRef.current = Math.min(1, moveSpeedRef.current + delta * 6);
         landingSpeedRef.current = Math.min(1, landingSpeedRef.current + delta * 8);
         const spd = MOVE_SPEED * delta * moveSpeedRef.current * landingSpeedRef.current;
-        ndcPosRef.current.x += _inputVec2.x * (spd / Math.max(worldPerNdcX, 0.001));
-        ndcPosRef.current.y += _inputVec2.y * (spd / Math.max(worldPerNdcY, 0.001));
-        jumpVelocityRef.current.copy(_inputVec2);
+        groundSpeedRef.current = MOVE_SPEED * moveSpeedRef.current * landingSpeedRef.current * dir.length();
+        ndcPosRef.current.x += dir.x * (spd / Math.max(worldPerNdcX, 0.001));
+        ndcPosRef.current.y += dir.y * (spd / Math.max(worldPerNdcY, 0.001));
+        jumpVelocityRef.current.copy(dir);
       } else {
         const spd = MOVE_SPEED * delta * moveSpeedRef.current;
         ndcPosRef.current.x += jumpVelocityRef.current.x * (spd / Math.max(worldPerNdcX, 0.001));
         ndcPosRef.current.y += jumpVelocityRef.current.y * (spd / Math.max(worldPerNdcY, 0.001));
       }
 
-      // Clamp NDC to play area
-      ndcPosRef.current.x = Math.max(-1 + EDGE_MARGIN, Math.min(1 - EDGE_MARGIN, ndcPosRef.current.x));
-      ndcPosRef.current.y = Math.max(-1 + EDGE_MARGIN, Math.min(farNDCY - EDGE_MARGIN, ndcPosRef.current.y));
+      // Dead zone: the model stays inside it on screen. Whatever it moved past an
+      // edge is converted to world units and applied to the camera instead, so the
+      // world slides under the model. NDC +Y is world -Z.
+      const boxYMax = Math.min(DEAD_ZONE.centerY + DEAD_ZONE.halfY, farNDCY - EDGE_MARGIN);
+      const clampedX = Math.max(
+        DEAD_ZONE.centerX - DEAD_ZONE.halfX,
+        Math.min(DEAD_ZONE.centerX + DEAD_ZONE.halfX, ndcPosRef.current.x)
+      );
+      const clampedY = Math.max(DEAD_ZONE.centerY - DEAD_ZONE.halfY, Math.min(boxYMax, ndcPosRef.current.y));
+      // Scroll only by what this frame's movement pushed past the edge, so any other
+      // change in the clamp (e.g. the far limit) can't make the world jump.
+      const scrollNdc = (excess: number, moved: number) =>
+        excess * moved > 0 ? (Math.abs(excess) < Math.abs(moved) ? excess : moved) : 0;
+      const scrollX = scrollNdc(ndcPosRef.current.x - clampedX, ndcPosRef.current.x - prevNdcX) * worldPerNdcX;
+      const scrollZ = -scrollNdc(ndcPosRef.current.y - clampedY, ndcPosRef.current.y - prevNdcY) * worldPerNdcY;
+      ndcPosRef.current.set(clampedX, clampedY);
+      if (scrollX !== 0 || scrollZ !== 0) {
+        cameraFocus.x += scrollX;
+        cameraFocus.y += scrollZ;
+        // Translation only; the orientation never changes, so unprojection stays valid.
+        cam.position.set(cameraFocus.x, cameraRig.height, cameraFocus.y + cameraRig.zOffset);
+        cam.updateMatrixWorld();
+      }
 
       // Unproject NDC → world position
       _raycaster.setFromCamera(ndcPosRef.current, cam);
@@ -461,6 +545,7 @@ const ModelController = () => {
     } else if (!isAirborne && !isLanding) {
       moveSpeedRef.current = 0;
       jumpVelocityRef.current.set(0, 0);
+      smoothDirValidRef.current = false;
     }
 
     // 7. Pet / scratch trigger
@@ -628,6 +713,15 @@ const ModelController = () => {
       }
     }
 
+    // Match the walk cycle to the ground speed (kept as-is while standing, so it
+    // doesn't change under the blend-out)
+    const walkNatural = walkNaturalSpeedRef.current;
+    if (a.walk && walkNatural && canMove) {
+      a.walk.timeScale = THREE.MathUtils.clamp(
+        (groundSpeedRef.current / walkNatural) * WALK_ANIM_SPEED_SCALE, 0.5, 1.5
+      );
+    }
+
     mixerRef.current?.update(delta);
     // Update front paw world positions for grass interaction
     for (let i = 0; i < 2; i++) {
@@ -661,9 +755,12 @@ const ModelController = () => {
     // Fade grass ground contact out as the dog lifts off (smooth, so takeoff/landing don't pop).
     modelGroundedRef.value = 1 - THREE.MathUtils.smoothstep(extraHeight, 0.03, 0.16);
 
-    // 11. Fixed sun position; shadow angle/length changes as the model moves
+    // 11. Sun sits at a fixed offset from the camera focus (so it follows the scrolling
+    //     world); shadow angle/length changes as the model moves on screen
     if (shadowLightRef.current) {
-      shadowLightRef.current.position.copy(SUN_POSITION);
+      shadowLightRef.current.position.set(
+        cameraFocus.x + SUN_POSITION.x, SUN_POSITION.y, cameraFocus.y + SUN_POSITION.z
+      );
       shadowLightRef.current.target.position.copy(worldPosRef.current);
       shadowLightRef.current.target.updateMatrixWorld();
       // Render once at start (it may mount straight into sit_loop), then only while the pose changes.
@@ -674,7 +771,12 @@ const ModelController = () => {
 
     // 12. Apply world position and rotation to mesh
     if (modelRef.current) {
-      modelRef.current.position.copy(worldPosRef.current);
+      // Sit on the curved ground; modelWorldPos stays flat (grass compares XZ only)
+      modelRef.current.position.set(
+        worldPosRef.current.x,
+        -curveDrop(worldPosRef.current.x, worldPosRef.current.z),
+        worldPosRef.current.z
+      );
       modelWorldPos.copy(worldPosRef.current);
       const s = sitStateRef.current;
       modelSitAmountRef.value = (s === 'sit_loop' || s === 'sit_loop2' || s === 'sit_start' || s === 'scratch') ? 1 : 0;

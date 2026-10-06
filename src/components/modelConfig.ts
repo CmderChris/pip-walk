@@ -29,21 +29,48 @@ export const BLEND_TIME = 0.3;         // standard crossfade duration in seconds
 export const JUMP_BLEND_TIME = 0.35;   // jump landing → idle/walk blend duration
 export const SIT_LOOP2_INTERVAL_MIN = 15;
 export const SIT_LOOP2_INTERVAL_MAX = 20;
-export const MOVE_SPEED = 7;           // world units/second
+export const MOVE_SPEED = 4.8;        // world units/second (also the world's scroll speed)
 export const MODEL_Y_OFFSET = 0.04;    // lifts model so feet don't clip ground
 export const ROTATION_SPEED = 10;
 export const MIN_SPEED_FOR_WALK = 0.5;
+// Fine-tunes the walk cycle against the ground speed it's matched to (1 = exact match).
+// Below 1 slows the legs down; above 1 speeds them up.
+export const WALK_ANIM_SPEED_SCALE = 0.88;
 export const EDGE_MARGIN = 0.02;       // NDC margin inside each screen edge
-export const PLAY_AREA_FAR_Z = -25;    // world Z of the back boundary
+export const PLAY_AREA_FAR_Z = -25;    // Z (relative to the camera focus) beyond which the ground can't be unprojected
+
+// ── World scrolling ────────────────────────────────────────────────────────
+// The model stays near the screen centre. It can move freely inside this small
+// dead zone (NDC units); pushing past an edge scrolls the world (moves the camera)
+// at the model's speed instead of moving the model on screen. Widen halfX/halfY
+// for a looser feel, shrink them to pin the model closer to the centre.
+export const DEAD_ZONE = { centerX: 0, centerY: -0.3, halfX: 0.11, halfY: 0.09 };
+// Where the model starts on screen: the dead zone's centre.
+export const START_NDC = { x: DEAD_ZONE.centerX, y: DEAD_ZONE.centerY };
+// How quickly the movement direction follows the input (1/s). Higher = snappier turns.
+export const DIRECTION_SMOOTHING = 14;
+
+// ── Camera ─────────────────────────────────────────────────────────────────
+// 50° vertical FOV (the default 75° stretches things near the screen edges).
+export const CAMERA_FOV = 50;
+
+// ── World curvature ────────────────────────────────────────────────────────
+// Ground and grass drop by CURVE_STRENGTH * (CURVE_X_WEIGHT * dx² + dz²) with
+// distance from the camera focus. The horizon sits roughly 47 units beyond the
+// focus at 0.0008 (a sphere of radius 1 / (2 * strength) = 625).
+export const CURVE_STRENGTH = 0.0008;
+export const CURVE_X_WEIGHT = 0.6;     // < 1: bends less sideways than toward the horizon
 
 // ── Lighting ───────────────────────────────────────────────────────────────
-// Fixed sun position, shared by the shadow-casting light and Grass's shadow/backlight shaders.
+// Sun offset from the camera focus, shared by the shadow-casting light and Grass's
+// shadow/backlight shaders. The light follows the focus, so shadows stay put while scrolling.
 export const SUN_POSITION = new THREE.Vector3(0, 35, -60);
 
 // ── Fog ────────────────────────────────────────────────────────────────────
-// Shared by Scene's <fog> and Grass's field radius.
-export const FOG_NEAR = 80;
-export const FOG_FAR = 360;
+// Shared by Scene's <fog> and Grass's field radius. The curved horizon hides
+// anything past ~65 units from the camera, so fog fades the world edge out.
+export const FOG_NEAR = 25;
+export const FOG_FAR = 80;
 
 // ── Types ──────────────────────────────────────────────────────────────────
 export type SitState =
