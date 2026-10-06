@@ -19,6 +19,8 @@ import { setWeights, type AnimationActions } from './animationHelpers';
 
 import { modelWorldPos, modelSitAmountRef, modelForwardRef, modelPawPositions, modelGroundedRef, cameraFocus, cameraRig } from './modelState';
 import { curveDrop } from './worldCurve';
+import { useAssetUrl } from './assets';
+import { controlBus } from './controlBus';
 
 // Pre-allocated — never created per frame
 const _raycaster = new THREE.Raycaster();
@@ -29,18 +31,20 @@ const _tempVec3 = new THREE.Vector3();
 const _ndcSample = new THREE.Vector2();
 const _inputVec2 = new THREE.Vector2();
 
-const ModelController = () => {
-  const { scene, animations } = useGLTF(MODEL_PATH, true);
+// inputEnabled = false (before Start, or while paused) ignores keys, joystick, jump and petting.
+const ModelController = ({ inputEnabled = true }: { inputEnabled?: boolean }) => {
+  const assetUrl = useAssetUrl();
+  const { scene, animations } = useGLTF(assetUrl(MODEL_PATH), true);
   const modelRef = useRef<THREE.Group>(null);
   const shadowLightRef = useRef<THREE.DirectionalLight>(null!);
   const { camera, gl, scene: threeScene } = useThree();
 
 
   const [albedo, normal, roughness, ao] = useTexture([
-    `${TEXTURE_BASE}/Spitz_Albedo3.png`,
-    `${TEXTURE_BASE}/Spitz_Normal.png`,
-    `${TEXTURE_BASE}/Spitz_Roughness.png`,
-    `${TEXTURE_BASE}/Spitz_AO.png`,
+    assetUrl(`${TEXTURE_BASE}/Spitz_Albedo3.png`),
+    assetUrl(`${TEXTURE_BASE}/Spitz_Normal.png`),
+    assetUrl(`${TEXTURE_BASE}/Spitz_Roughness.png`),
+    assetUrl(`${TEXTURE_BASE}/Spitz_AO.png`),
   ]);
 
   // ── Action refs ────────────────────────────────────────────────────────────
@@ -92,6 +96,17 @@ const ModelController = () => {
 
   // ── Jump refs ──────────────────────────────────────────────────────────────
   const petTriggeredRef = useRef(false);
+  const inputEnabledRef = useRef(inputEnabled);
+
+  // Anything held when input turns off would otherwise stay held (key-ups are ignored too)
+  useEffect(() => {
+    inputEnabledRef.current = inputEnabled;
+    if (!inputEnabled) {
+      keysPressedRef.current = { w: false, a: false, s: false, d: false };
+      joystickRef.current = { x: 0, y: 0 };
+      jumpPressedRef.current = false;
+    }
+  }, [inputEnabled]);
 
   const jumpReturnBlendRef = useRef(0);
   const jumpVelocityRef = useRef(new THREE.Vector2(0, 0));
@@ -355,7 +370,13 @@ const ModelController = () => {
 
   // ── Input listeners ────────────────────────────────────────────────────────
   useEffect(() => {
+    // Keys typed into a form field or editable area belong to the host page, not the dog
+    const isTyping = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null;
+      return !!el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
+    };
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (!inputEnabledRef.current || isTyping(e)) return;
       const key = e.key.toLowerCase();
       if (key === 'w' || key === 'arrowup')    keysPressedRef.current.w = true;
       if (key === 'a' || key === 'arrowleft')  keysPressedRef.current.a = true;
@@ -385,20 +406,23 @@ const ModelController = () => {
   }, []);
 
   useEffect(() => {
-    window.updateJoystick = (x: number, y: number) => { joystickRef.current = { x, y }; };
-    return () => { window.updateJoystick = undefined; };
-  }, []);
-
-  useEffect(() => {
-    window.triggerJump = () => { jumpPressedRef.current = true; };
-    return () => { window.triggerJump = undefined; };
+    controlBus.joystick = (x: number, y: number) => {
+      if (inputEnabledRef.current) joystickRef.current = { x, y };
+    };
+    controlBus.jump = () => {
+      if (inputEnabledRef.current) jumpPressedRef.current = true;
+    };
+    return () => {
+      controlBus.joystick = null;
+      controlBus.jump = null;
+    };
   }, []);
 
   // Click / tap to pet the model
   useEffect(() => {
     const pettableStates: SitState[] = ['idle', 'sit_loop'];
     const handleInteract = (clientX: number, clientY: number) => {
-      if (!modelRef.current) return;
+      if (!modelRef.current || !inputEnabledRef.current) return;
       const canvas = gl.domElement;
       const rect = canvas.getBoundingClientRect();
       const ndc = new THREE.Vector2(

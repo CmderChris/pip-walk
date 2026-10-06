@@ -26,6 +26,14 @@ let countdown = rand(FIRST_GUST_DELAY);
 let gustTimeLeft = 0;
 let gustSpeed = 0; // world units/s
 
+export function resetWind() {
+  windState.active = false;
+  windState.front = 0;
+  countdown = rand(FIRST_GUST_DELAY);
+  gustTimeLeft = 0;
+  gustSpeed = 0;
+}
+
 export function updateWind(delta: number, focusX: number, focusZ: number) {
   const dt = Math.min(delta, 0.1);
 

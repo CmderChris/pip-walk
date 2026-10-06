@@ -3,6 +3,8 @@ import * as THREE from 'three'
 import { useFrame, useThree } from '@react-three/fiber'
 import { useTexture } from '@react-three/drei'
 import { cameraFocus } from './modelState'
+import { useAssetUrl } from './assets'
+import { GROUND_NORMAL_PATH } from './modelConfig'
 import { curveDropGLSL, curveUniforms } from './worldCurve'
 
 // The plane only needs to reach past the fog (80 from the camera, which sits ~16 behind
@@ -15,7 +17,8 @@ const TILE = GROUND_SIZE / GROUND_REPEAT
 const GROUND_SEGMENTS = 40
 
 const Ground: React.FC = () => {
-  const normalMap = useTexture('/textures/Ground103_1K-PNG_NormalGL.png')
+  const assetUrl = useAssetUrl()
+  const normalMap = useTexture(assetUrl(GROUND_NORMAL_PATH))
   const maxAnisotropy = useThree((state) => state.gl.capabilities.getMaxAnisotropy())
   const normalScale = useMemo(() => new THREE.Vector2(1.2, 1.2), [])
   const meshRef = useRef<THREE.Mesh>(null)

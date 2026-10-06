@@ -1,8 +1,11 @@
 import * as THREE from 'three';
 
 // ── Animation clip names ───────────────────────────────────────────────────
-export const MODEL_PATH = '/models/new_dog4.glb';
-export const TEXTURE_BASE = '/models/pomeranian_model/spitz_textures/texture';
+// Asset paths are relative to the asset base (see assets.ts)
+export const MODEL_PATH = 'models/new_dog4.glb';
+export const TEXTURE_BASE = 'models/pomeranian_model/spitz_textures/texture';
+export const GROUND_NORMAL_PATH = 'textures/Ground103_1K-PNG_NormalGL.png';
+export const ENV_PATH = 'env/park.hdr';
 
 export const WALK_ANIM = 'Arm_SpitzWalk_F_IP';
 export const IDLE_ANIM = 'Arm_SpitzIdle_1';

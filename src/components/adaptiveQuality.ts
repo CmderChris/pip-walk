@@ -25,6 +25,16 @@ let steadyTime = 0;
 let sinceDecrease = Infinity;
 let decreases = 0;
 
+export function resetAdaptiveQuality() {
+  qualityScale.value = 1;
+  elapsed = 0;
+  windowTime = 0;
+  windowFrames = 0;
+  steadyTime = 0;
+  sinceDecrease = Infinity;
+  decreases = 0;
+}
+
 /** Call once per frame. Returns true when qualityScale changed. */
 export function updateAdaptiveQuality(delta: number): boolean {
   // A background tab or one-off hitch says nothing about sustained speed
