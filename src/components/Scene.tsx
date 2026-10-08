@@ -4,7 +4,7 @@ import * as THREE from 'three';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { Sky, Environment } from '@react-three/drei';
 import { EffectComposer, Bloom, Vignette, N8AO } from '@react-three/postprocessing';
-import { isLowEnd } from './perfTier';
+import { isLowEnd, canvasDpr } from './perfTier';
 import { SUN_POSITION, FOG_NEAR, FOG_FAR, ENV_PATH } from './modelConfig';
 import { AssetContext, joinAssetPath } from './assets';
 import { createJoystick, createJumpButton } from './ButtonOverlay';
@@ -100,7 +100,7 @@ const Scene = ({
       <Canvas
         frameloop={paused ? 'never' : 'always'}
         shadows={isLowEnd ? false : { type: THREE.PCFShadowMap }}
-        dpr={isLowEnd ? 1 : [1, 2]}
+        dpr={canvasDpr}
         resize={{ scroll: false, debounce: { scroll: 50, resize: 50 } }}
       >
         {/* Context doesn't cross R3F's reconciler, so provide it inside the Canvas */}
