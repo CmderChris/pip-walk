@@ -101,6 +101,7 @@ const Scene = ({
         frameloop={paused ? 'never' : 'always'}
         shadows={isLowEnd ? false : { type: THREE.PCFShadowMap }}
         dpr={canvasDpr}
+        flat={isLowEnd}
         resize={{ scroll: false, debounce: { scroll: 50, resize: 50 } }}
       >
         {/* Context doesn't cross R3F's reconciler, so provide it inside the Canvas */}
@@ -109,7 +110,7 @@ const Scene = ({
 
           <CameraController />
 
-          <ambientLight intensity={isLowEnd ? 0.6 : 0.25} />
+          <ambientLight intensity={isLowEnd ? 0.4 : 0.25} />
 
           {!isLowEnd && (
             <EffectComposer multisampling={0}>
