@@ -82,7 +82,7 @@ src/
     modelConfig.ts         Animation names, tuning values, sun position, fog distances
     modelState.ts          Values the dog shares with the grass each frame
     animationHelpers.ts    Animation weight helper
-    perfTier.ts            Low-end device detection
+    perfTier.ts            Low-end device detection, pixel ratio and grass density tiers
 public/
   models/                  Dog model and textures
   textures/                Ground textures
@@ -97,7 +97,15 @@ public/
 
 ## Performance tiers
 
-`perfTier.ts` treats a device as low-end if it has a mobile user agent (including iPadOS) or four or fewer CPU threads. Low-end devices render at a device pixel ratio of 1, with no real-time shadows, no post-processing and fewer grass blades.
+`perfTier.ts` treats a device as low-end if it has a mobile user agent (including iPadOS) or four or fewer CPU threads. Low-end devices get no real-time shadows and no post-processing, and the pixel ratio and grass density depend on how capable they are:
+
+| Tier | Pixel ratio | Grass density |
+| --- | --- | --- |
+| Desktop | 1–2 | 100% |
+| Mid-range mobile (6+ cores, 4 GB+ memory) | 1.5–2 | 100% |
+| Other low-end | 1–1.5 | 70% |
+
+The pixel ratio range is clamped to the device's real `devicePixelRatio`. `adaptiveQuality.ts` can still thin the grass at runtime if the frame rate can't hold.
 
 ## Tech
 
